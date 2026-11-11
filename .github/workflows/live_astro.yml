@@ -27,5 +27,5 @@ jobs:
       - name: Run 1-Minute Live Astrology Engine
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_ID: ${{ secrets.SPREADSHEET_ID }}
         run: python astro_engine.py
