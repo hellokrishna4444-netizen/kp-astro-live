@@ -232,11 +232,9 @@ def calculate_planet_next_change(p_name, deg_in_rashi, speed, dt_local):
     """Calculates exact Local & IST date-time when planet changes Rashi/Pada."""
     if abs(speed) < 0.0001:
         return "Stationary (0 spd)", "Stationary (0 spd)"
-    # Distance to next Rashi boundary (30 deg if direct, 0 deg if retrograde)
     rem_deg = (30.0 - deg_in_rashi) if speed > 0 else deg_in_rashi
     days_left = rem_deg / abs(speed)
     
-    # For very slow outer planets (Sa, Ra, Ke, Ur, Ne, Pl), show next Nakshatra Pada (3.333 deg) change if Rashi > 60 days
     label_type = "Rashi"
     if days_left > 45.0:
         pada_span = 30.0 / 9.0
@@ -494,7 +492,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
 
     sav_points = compute_sav_points(rashi_signs_dict)
     
-    # Row 1 of Planetary Table: Ascendant (Lagna changes ~every 2 hrs)
     planet_rows = [[
         "As", deg_to_dms(asc_deg), asc_kp["rashi"], asc_kp["tattva"], asc_kp["nak"],
         asc_kp["nl"], asc_kp["sl"], "0.00", f"SAV:{sav_points[asc_r_idx]}", "Lagna (~2h)", "Active Horizon",
@@ -637,7 +634,7 @@ def safe_api_call(func, *args, **kwargs):
                 raise e
 
 def apply_professional_styling(ws):
-    """Applies institutional color-coding, Kundli borders, text wrap, and auto-fit."""
+    """Applies institutional color-coding, Kundli borders, text wrap, and exact column widths."""
     sheet_id = ws.id
     requests = [
         {
@@ -664,9 +661,37 @@ def apply_professional_styling(ws):
     solid_border = {"style": "SOLID_MEDIUM", "color": {"red": 0.25, "green": 0.25, "blue": 0.30}}
     thin_border = {"style": "SOLID", "color": {"red": 0.70, "green": 0.72, "blue": 0.78}}
 
+    col_widths = [
+        (0, 75),   # Body / Aspect Label
+        (1, 95),   # Longitude
+        (2, 65),   # Rasi
+        (3, 110),  # Tattva
+        (4, 125),  # Nakshatra(P)
+        (5, 55),   # NL
+        (6, 55),   # SL
+        (7, 65),   # Speed
+        (8, 165),  # Shadbala & SAV
+        (9, 105),  # Baladi Avastha
+        (10, 150), # Dignity & Flags
+        (11, 175), # Next Change (Local)
+        (12, 175), # Next Change (IST)
+        (13, 340), # Clear Trading Summary (With Reason)
+        (14, 45),  # Spacer / Chart Col
+        (15, 45),  # Spacer / Chart Col
+        (16, 25),  # Gap before Hora Matrix
+        (17, 55),  # H#
+        (18, 85),  # Start(Loc)
+        (19, 85),  # End(Loc)
+        (20, 85),  # Start(IST)
+        (21, 85),  # End(IST)
+        (22, 55),  # Hora Lord
+        (23, 135), # Varesh Relation
+        (24, 195)  # Action Signal
+    ]
+
     for idx, (r0, c0) in enumerate(quadrants):
         bg_col = header_colors[idx]
-        # Top Exchange Banner
+        
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r0, "endRowIndex": r0 + 1, "startColumnIndex": c0, "endColumnIndex": c0 + 25},
@@ -679,7 +704,7 @@ def apply_professional_styling(ws):
                 "fields": "userEnteredFormat(backgroundColor,textFormat)"
             }
         })
-        # Sub-headers (Row +1)
+        
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r0 + 1, "endRowIndex": r0 + 2, "startColumnIndex": c0, "endColumnIndex": c0 + 25},
@@ -692,7 +717,7 @@ def apply_professional_styling(ws):
                 "fields": "userEnteredFormat(backgroundColor,textFormat)"
             }
         })
-        # D1 & D9 Kundli Chart Styling + Proper Kundli Borders
+        
         for chart_c in [c0, c0 + 8]:
             requests.append({
                 "repeatCell": {
@@ -715,19 +740,70 @@ def apply_professional_styling(ws):
                     "innerHorizontal": thin_border, "innerVertical": thin_border
                 }
             })
-        # Planetary Table Header (Row +34)
+            
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r0 + 34, "endRowIndex": r0 + 35, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
                 "cell": {
                     "userEnteredFormat": {
                         "backgroundColor": {"red": 0.20, "green": 0.25, "blue": 0.33},
-                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}
+                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
+                        "wrapStrategy": "WRAP"
                     }
                 },
-                "fields": "userEnteredFormat(backgroundColor,textFormat)"
+                "fields": "userEnteredFormat(backgroundColor,textFormat,wrapStrategy)"
             }
         })
+
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 35, "endRowIndex": r0 + 48, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
+                "cell": {
+                    "userEnteredFormat": {
+                        "wrapStrategy": "WRAP",
+                        "verticalAlignment": "MIDDLE"
+                    }
+                },
+                "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"
+            }
+        })
+        requests.append({
+            "updateBorders": {
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 34, "endRowIndex": r0 + 48, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
+                "top": solid_border, "bottom": solid_border, "left": solid_border, "right": solid_border,
+                "innerHorizontal": thin_border, "innerVertical": thin_border
+            }
+        })
+
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 1, "endRowIndex": r0 + 26, "startColumnIndex": c0 + 17, "endColumnIndex": c0 + 25},
+                "cell": {
+                    "userEnteredFormat": {
+                        "wrapStrategy": "WRAP",
+                        "verticalAlignment": "MIDDLE"
+                    }
+                },
+                "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"
+            }
+        })
+        requests.append({
+            "updateBorders": {
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 1, "endRowIndex": r0 + 26, "startColumnIndex": c0 + 17, "endColumnIndex": c0 + 25},
+                "top": solid_border, "bottom": solid_border, "left": solid_border, "right": solid_border,
+                "innerHorizontal": thin_border, "innerVertical": thin_border
+            }
+        })
+
+        if r0 == 0:
+            for offset_col, px_width in col_widths:
+                requests.append({
+                    "updateDimensionProperties": {
+                        "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": c0 + offset_col, "endIndex": c0 + offset_col + 1},
+                        "properties": {"pixelSize": px_width},
+                        "fields": "pixelSize"
+                    }
+                })
 
     cond_rules = [
         ("🟢", {"red": 0.85, "green": 0.96, "blue": 0.87}, {"red": 0.05, "green": 0.40, "blue": 0.15}),
@@ -754,16 +830,12 @@ def apply_professional_styling(ws):
             }
         })
 
-    requests.append({
-        "autoResizeDimensions": {
-            "dimensions": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 55}
-        }
-    })
-
     safe_api_call(sheet.batch_update, {"requests": requests})
 
 def update_single_sheet(d, ws, is_live):
     title = d.strftime("%Y-%m-%d")
+    if ws.col_count < 55 or ws.row_count < 130:
+        safe_api_call(ws.resize, rows=130, cols=55)
     batch_updates = []
     for city, cfg in CITIES.items():
         matrix = build_city_matrix(d, city, cfg, is_live=is_live)
@@ -801,7 +873,7 @@ def run_live_engine():
         if is_today:
             today_ws = ws
 
-    # Ensure today's sheet is always styled even if it already existed
+    # Ensure today's sheet is always styled and resized cleanly
     apply_professional_styling(today_ws)
 
     # 3. Every 1-Minute Live Loop for Today's Sheet
