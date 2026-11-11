@@ -12,25 +12,24 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 DAYS_BACK = 30
 DAYS_AHEAD = 18
-LIVE_LOOP_MINUTES = 14  # Updates every 60s for 14 mins per GitHub cycle
+LIVE_LOOP_MINUTES = 14  # Runs every 60s for 14 mins per GitHub cycle
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_dict = json.loads(os.environ["GCP_SA_KEY"])
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
-# Clean Sheet ID automatically (handles full URL or extra spaces)
 raw_id = os.environ["SHEET_ID"].strip()
 if "/d/" in raw_id:
     raw_id = raw_id.split("/d/")[1].split("/")[0]
 sheet = client.open_by_key(raw_id)
 
-# Exchanges Configuration (Top-Left, Top-Right, Bottom-Left, Bottom-Right)
+# Exchanges Configuration (25-column wide quadrants for extra IST & Summary columns)
 CITIES = {
-    "Mumbai_NSE": {"lat": 19.0760, "lon": 72.8777, "tz": "Asia/Kolkata",     "row": 1,  "col": 1,  "janma_nak": 12}, # Hasta
-    "Tokyo_TSE":  {"lat": 35.6762, "lon": 139.6503,"tz": "Asia/Tokyo",       "row": 1,  "col": 25, "janma_nak": 3},  # Rohini
-    "London_LSE": {"lat": 51.5074, "lon": -0.1278, "tz": "Europe/London",    "row": 64, "col": 1,  "janma_nak": 9},  # Magha
-    "New_York":   {"lat": 40.7128, "lon": -74.0060,"tz": "America/New_York", "row": 64, "col": 25, "janma_nak": 21}  # Shravana
+    "Mumbai_NSE": {"lat": 19.0760, "lon": 72.8777, "tz": "Asia/Kolkata",     "row": 1,  "col": 1,  "janma_nak": 12},
+    "Tokyo_TSE":  {"lat": 35.6762, "lon": 139.6503,"tz": "Asia/Tokyo",       "row": 1,  "col": 27, "janma_nak": 3},
+    "London_LSE": {"lat": 51.5074, "lon": -0.1278, "tz": "Europe/London",    "row": 64, "col": 1,  "janma_nak": 9},
+    "New_York":   {"lat": 40.7128, "lon": -74.0060,"tz": "America/New_York", "row": 64, "col": 27, "janma_nak": 21}
 }
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
@@ -118,7 +117,7 @@ GULIKA_PART = {6: 6, 0: 5, 1: 4, 2: 3, 3: 2, 4: 1, 5: 0}
 swe.set_sid_mode(swe.SIDM_KRISHNAMURTI, 0, 0)
 
 # ==========================================
-# 3. SHASTRA CALCULATION ENGINES
+# 3. SHASTRA & EXACT TIMING ENGINES
 # ==========================================
 def fmt_local_ist(dt_local, fmt="%I:%M %p"):
     ist_str = dt_local.astimezone(IST_TZ).strftime(fmt)
@@ -154,7 +153,7 @@ def get_baladi_avastha(rashi_num, deg_in_rashi):
 
 def compute_shadbala_rupas(p_name, lon, speed, h_d1, is_day, su_lon, mo_lon):
     if p_name not in SHADBALA_REQ:
-        return "N/A"
+        return "N/A", False
     uchha_pt = PARAM_UCHHA_DEG[p_name]
     neech_pt = (uchha_pt + 180.0) % 360.0
     dist_neech = min(abs(lon - neech_pt), 360.0 - abs(lon - neech_pt))
@@ -175,8 +174,8 @@ def compute_shadbala_rupas(p_name, lon, speed, h_d1, is_day, su_lon, mo_lon):
     cheshta_bala = 60.0 if speed < 0 else 30.0
     nais_bala = NAISARGIKA_BALA[p_name]
     total_rupas = (uchha_bala + kendra_bala + dig_bala + kaala_bala + cheshta_bala + nais_bala + 45.0) / 60.0
-    tag = "STRONG" if (total_rupas / SHADBALA_REQ[p_name]) >= 1.0 else "WEAK"
-    return f"{total_rupas:.2f}R({tag})"
+    is_strong = (total_rupas / SHADBALA_REQ[p_name]) >= 1.0
+    return f"{total_rupas:.2f}R({'STRONG' if is_strong else 'WEAK'})", is_strong
 
 def compute_sav_points(rashi_signs_dict):
     sav = [0] * 12
@@ -229,6 +228,86 @@ def get_kp_full(deg):
         "d9": d9_rashi, "nak": nak_name, "nak_idx": nak_idx, "pada": pada, "nl": nl, "sl": sl
     }
 
+def calculate_planet_next_change(p_name, deg_in_rashi, speed, dt_local):
+    """Calculates exact Local & IST date-time when planet changes Rashi/Pada."""
+    if abs(speed) < 0.0001:
+        return "Stationary (0 spd)", "Stationary (0 spd)"
+    # Distance to next Rashi boundary (30 deg if direct, 0 deg if retrograde)
+    rem_deg = (30.0 - deg_in_rashi) if speed > 0 else deg_in_rashi
+    days_left = rem_deg / abs(speed)
+    
+    # For very slow outer planets (Sa, Ra, Ke, Ur, Ne, Pl), show next Nakshatra Pada (3.333 deg) change if Rashi > 60 days
+    label_type = "Rashi"
+    if days_left > 45.0:
+        pada_span = 30.0 / 9.0
+        rem_pada = (pada_span - (deg_in_rashi % pada_span)) if speed > 0 else (deg_in_rashi % pada_span)
+        days_left = rem_pada / abs(speed)
+        label_type = "Pada"
+        
+    change_dt_loc = dt_local + datetime.timedelta(days=days_left)
+    change_dt_ist = change_dt_loc.astimezone(IST_TZ)
+    
+    if days_left < 2.0:
+        loc_s = f"{label_type}: {change_dt_loc.strftime('%d-%b %I:%M %p')}"
+        ist_s = f"{change_dt_ist.strftime('%d-%b %I:%M %p')} IST"
+    else:
+        loc_s = f"{label_type}: {change_dt_loc.strftime('%d-%b-%y %H:%M')}"
+        ist_s = f"{change_dt_ist.strftime('%d-%b-%y %H:%M')} IST"
+    return loc_s, ist_s
+
+def build_planet_trading_summary(p_name, kp, flags, avastha, is_strong, sav_val):
+    """Generates clear institutional trading verdict with exact astrological reason."""
+    reasons = []
+    if "SANDHI" in flags:
+        reasons.append("Rashi Sandhi (29°-1°): Extreme Whipsaw & Stop-Hunt Risk")
+    if "NEECH" in flags:
+        reasons.append(f"Neech in {kp['rashi']}: False Breakouts, Fade Extremes")
+    elif "UCHHA" in flags:
+        reasons.append(f"Uchha in {kp['rashi']}: High-Conviction Directional Momentum")
+    if "VAKRI(R)" in flags and p_name not in ["Ra", "Ke"]:
+        reasons.append("Vakri(R): Retests Old Gaps/FVG & Reverses")
+    if "ASTA" in flags:
+        reasons.append("Asta (Combust): Suppressed Follow-Through")
+    if "Yuva" in avastha:
+        reasons.append("Yuva(100%): Full Institutional Execution Power")
+    elif "Mrit" in avastha or "Baal" in avastha:
+        reasons.append(f"{avastha}: Weak Follow-Through, Scalp Only")
+    if sav_val > 30:
+        reasons.append(f"SAV:{sav_val}(Strong Support/Res)")
+    elif sav_val < 24:
+        reasons.append(f"SAV:{sav_val}(Fragile Zone)")
+        
+    if not reasons:
+        return f"Normal ({kp['tattva']}): Standard Technical Confluence via {kp['nl']}/{kp['sl']}"
+    return " | ".join(reasons[:2])
+
+def get_next_aspect_timing(planet_lons, planet_speeds, dt_local):
+    """Finds the fastest approaching exact aspect (0, 60, 90, 120, 180) driven by Moon."""
+    mo_lon = planet_lons["Mo"]
+    mo_spd = planet_speeds["Mo"]
+    targets = [0, 60, 90, 120, 180]
+    best_hours = 999.0
+    best_desc = ""
+    
+    for p_name, p_lon in planet_lons.items():
+        if p_name == "Mo": continue
+        rel_spd = mo_spd - planet_speeds.get(p_name, 0.0)
+        if rel_spd <= 0.5: continue
+        curr_diff = (mo_lon - p_lon) % 360.0
+        for t in targets:
+            for ang in ([t] if t in [0, 180] else [t, 360 - t]):
+                rem = (ang - curr_diff) % 360.0
+                hrs = (rem / rel_spd) * 24.0
+                if 0.02 <= hrs < best_hours:
+                    best_hours = hrs
+                    best_desc = f"Mo-{t}°-{p_name}"
+                    
+    if best_hours < 48.0:
+        hit_loc = dt_local + datetime.timedelta(hours=best_hours)
+        mins_left = int(best_hours * 60)
+        return f"Next Exact Aspect: {best_desc} in {mins_left}m at {fmt_local_ist(hit_loc)}"
+    return "Aspect Matrix updates live every 1m (Moon moves ~0.5°/hr)"
+
 def get_sunrise_sunset(target_date, lat, lon, tz):
     dt_mid = tz.localize(datetime.datetime.combine(target_date, datetime.time(0, 0, 0)))
     u = dt_mid.astimezone(pytz.UTC)
@@ -260,11 +339,12 @@ def get_current_lagna_window(dt_local, lat, lon):
         return int((ascmc[0] % 360.0) // 30.0)
     curr_sign = asc_sign(dt_local)
     st, et = dt_local, dt_local
-    while asc_sign(st - datetime.timedelta(minutes=2)) == curr_sign:
-        st -= datetime.timedelta(minutes=2)
-    while asc_sign(et + datetime.timedelta(minutes=2)) == curr_sign:
-        et += datetime.timedelta(minutes=2)
-    return st, et
+    while asc_sign(st - datetime.timedelta(minutes=1)) == curr_sign:
+        st -= datetime.timedelta(minutes=1)
+    while asc_sign(et + datetime.timedelta(minutes=1)) == curr_sign:
+        et += datetime.timedelta(minutes=1)
+    next_rashi = RASHIS[(curr_sign + 1) % 12]
+    return st, et, next_rashi, TATTVA_MAP[next_rashi]
 
 def to_sbc_index(lon):
     if 276.6667 <= lon <= 280.8889: return 21
@@ -312,7 +392,7 @@ def get_karana_and_bhadra(tithi_deg, moon_rashi):
     return k_name, bhadra_vaas
 
 # ==========================================
-# 4. MASTER QUADRANT MATRIX BUILDER
+# 4. MASTER QUADRANT MATRIX BUILDER (25 COLS)
 # ==========================================
 def build_city_matrix(target_date, city_name, cfg, is_live=False):
     tz = pytz.timezone(cfg["tz"])
@@ -320,7 +400,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     dt_utc = dt_local.astimezone(pytz.UTC)
     jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day, dt_utc.hour + dt_utc.minute/60.0 + dt_utc.second/3600.0)
     
-    M = [["" for _ in range(23)] for _ in range(60)]
+    M = [["" for _ in range(25)] for _ in range(60)]
     day_lord = WEEKDAY_LORDS[target_date.weekday()]
     
     sr_dt, ss_dt, nsr_dt = get_sunrise_sunset(target_date, cfg["lat"], cfg["lon"], tz)
@@ -336,7 +416,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     in_rahu = (rk_start <= dt_local <= rk_end)
     in_gulika = (gk_start <= dt_local <= gk_end)
 
-    # --- 24 HORA + SANDHI KAAL (FIRST 5M & LAST 5M) ---
+    # --- 24 HORA WITH SEPARATE LOCAL & IST START/END COLUMNS (Cols 17 to 24) ---
     start_idx = HORA_SEQUENCE.index(day_lord)
     day_dur = (ss_dt - sr_dt) / 12.0
     night_dur = (nsr_dt - ss_dt) / 12.0
@@ -352,25 +432,27 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
         is_curr = (st <= dt_local <= et)
         if is_curr:
             active_hora_lord = h_lord
-            mins_from_start = (dt_local - st).total_seconds() / 60.0
-            mins_to_end = (et - dt_local).total_seconds() / 60.0
-            if is_live and (mins_from_start <= 5.0 or mins_to_end <= 5.0):
+            if is_live and ((dt_local - st).total_seconds()/60.0 <= 5.0 or (et - dt_local).total_seconds()/60.0 <= 5.0):
                 in_sandhi_kaal = True
                 
         mark = "👉 " if (is_curr and is_live) else ""
         M[2 + i][17] = f"{mark}{i + 1}"
         M[2 + i][18] = st.strftime("%I:%M %p")
         M[2 + i][19] = et.strftime("%I:%M %p")
-        M[2 + i][20] = h_lord
-        M[2 + i][21] = rel_str
-        M[2 + i][22] = rule_str
+        M[2 + i][20] = st.astimezone(IST_TZ).strftime("%I:%M %p")
+        M[2 + i][21] = et.astimezone(IST_TZ).strftime("%I:%M %p")
+        M[2 + i][22] = h_lord
+        M[2 + i][23] = rel_str
+        M[2 + i][24] = rule_str
 
     # --- TOP EXCHANGE HEADER ---
     M[0][0] = f"🌐 {city_name} ({cfg['tz']})"
     M[0][4] = f"LIVE: {fmt_local_ist(dt_local, '%d-%b %H:%M:%S')}"
     M[0][10] = f"Dinmaan: {dinmaan_mins:.1f}m | 1 Hora: {dinmaan_mins/12.0:.1f}m"
-    M[0][17] = "24 Hora & Shastra Execution Matrix"
-    M[1][17], M[1][18], M[1][19], M[1][20], M[1][21], M[1][22] = "H#", "Start", "End", "Lord", "Varesh Relation", "Action Signal"
+    M[0][17] = "24 Hora & Shastra Execution Matrix (Local & IST)"
+    M[1][17], M[1][18], M[1][19], M[1][20], M[1][21], M[1][22], M[1][23], M[1][24] = (
+        "H#", "Start(Loc)", "End(Loc)", "Start(IST)", "End(IST)", "Lord", "Varesh Relation", "Action Signal"
+    )
     
     M[1][0] = "☀️ Sunrise:"
     M[1][1] = fmt_local_ist(sr_dt)
@@ -379,18 +461,18 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[1][8] = f"Varesh: {day_lord}"
     M[1][10] = get_varesh_summary(day_lord)
 
-    # --- PLANETS, ASCENDANT, SHADBALA & SAV ---
+    # --- PLANETS, ASCENDANT (~2 HR LAGNA WINDOW), SHADBALA & SAV ---
     _, ascmc = swe.houses_ex(jd, cfg["lat"], cfg["lon"], b'P', swe.FLG_SIDEREAL)
     asc_deg = ascmc[0] % 360.0
     asc_kp = get_kp_full(asc_deg)
-    lagna_st, lagna_et = get_current_lagna_window(dt_local, cfg["lat"], cfg["lon"])
+    lagna_st, lagna_et, next_lagna_rashi, next_lagna_tattva = get_current_lagna_window(dt_local, cfg["lat"], cfg["lon"])
     
-    d1_houses = {i: ["AS"] if i == 1 else [] for i in range(1, 13)}
+    d1_houses = {i: [f"AS {int(asc_kp['deg_in_rashi'])}°"] if i == 1 else [] for i in range(1, 13)}
     d9_houses = {i: ["AS"] if i == 1 else [] for i in range(1, 13)}
     asc_r_idx = asc_kp["rashi_idx"]
     d9_asc_idx = RASHIS.index(asc_kp["d9"])
     
-    planet_lons, planet_speeds, planet_lats = {}, {}, {}
+    planet_lons, planet_speeds = {}, {}
     rashi_signs_dict = {"As": asc_r_idx}
     
     su_res, _ = swe.calc_ut(jd, swe.SUN, swe.FLG_SIDEREAL | swe.FLG_SPEED)
@@ -401,20 +483,24 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     for p_name, p_id in list(PLANETS.items()) + [("Ke", -1)]:
         if p_name == "Ke":
             ra_res, _ = swe.calc_ut(jd, swe.TRUE_NODE, swe.FLG_SIDEREAL | swe.FLG_SPEED)
-            lon, lat_p, speed = (ra_res[0] + 180.0) % 360.0, -ra_res[1], ra_res[3]
+            lon, speed = (ra_res[0] + 180.0) % 360.0, ra_res[3]
         else:
             res, _ = swe.calc_ut(jd, p_id, swe.FLG_SIDEREAL | swe.FLG_SPEED)
-            lon, lat_p, speed = res[0] % 360.0, res[1], res[3]
-        planet_lons[p_name], planet_speeds[p_name], planet_lats[p_name] = lon, speed, lat_p
+            lon, speed = res[0] % 360.0, res[3]
+        planet_lons[p_name], planet_speeds[p_name] = lon, speed
         kp = get_kp_full(lon)
         rashi_signs_dict[p_name] = kp["rashi_idx"]
         raw_bodies.append((p_name, lon, speed, kp))
 
     sav_points = compute_sav_points(rashi_signs_dict)
     
+    # Row 1 of Planetary Table: Ascendant (Lagna changes ~every 2 hrs)
     planet_rows = [[
         "As", deg_to_dms(asc_deg), asc_kp["rashi"], asc_kp["tattva"], asc_kp["nak"],
-        asc_kp["nl"], asc_kp["sl"], "0.00", f"SAV:{sav_points[asc_r_idx]}", "Lagna", "Active Horizon"
+        asc_kp["nl"], asc_kp["sl"], "0.00", f"SAV:{sav_points[asc_r_idx]}", "Lagna (~2h)", "Active Horizon",
+        f"Next {next_lagna_rashi}: {lagna_et.strftime('%I:%M %p')}",
+        f"{lagna_et.astimezone(IST_TZ).strftime('%I:%M %p')} IST",
+        f"{asc_kp['rashi']} [{asc_kp['tattva']}] active till {lagna_et.strftime('%I:%M %p')}; then {next_lagna_rashi} [{next_lagna_tattva}]"
     ]]
     
     for p_name, lon, speed, kp in raw_bodies:
@@ -431,19 +517,22 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
                 
         h_d1 = ((kp["rashi_idx"] - asc_r_idx) % 12) + 1
         h_d9 = ((RASHIS.index(kp["d9"]) - d9_asc_idx) % 12) + 1
-        lbl = f"{p_name}R" if is_retro else p_name
-        d1_houses[h_d1].append(lbl)
-        d9_houses[h_d9].append(lbl)
+        deg_int = int(kp["deg_in_rashi"])
+        d1_houses[h_d1].append(f"{p_name}{'R' if is_retro else ''} {deg_int}°")
+        d9_houses[h_d9].append(f"{p_name}{'R' if is_retro else ''}")
         
-        shadbala_str = compute_shadbala_rupas(p_name, lon, speed, h_d1, is_day, su_lon, mo_lon)
+        shadbala_str, is_strong = compute_shadbala_rupas(p_name, lon, speed, h_d1, is_day, su_lon, mo_lon)
         sav_val = sav_points[kp["rashi_idx"]]
         sav_tag = f"SAV:{sav_val}{'(Strong)' if sav_val>30 else ('(Weak)' if sav_val<24 else '')}"
+        avastha_str = get_baladi_avastha(kp["rashi_num"], kp["deg_in_rashi"])
+        next_loc, next_ist = calculate_planet_next_change(p_name, kp["deg_in_rashi"], speed, dt_local)
+        summary_str = build_planet_trading_summary(p_name, kp, flags, avastha_str, is_strong, sav_val)
         
         planet_rows.append([
             p_name, deg_to_dms(lon), kp["rashi"], kp["tattva"], f"{kp['nak']}({kp['pada']})",
             kp["nl"], kp["sl"], f"{speed:.2f}", f"{shadbala_str} | {sav_tag}",
-            get_baladi_avastha(kp["rashi_num"], kp["deg_in_rashi"]),
-            " | ".join(flags) if flags else "Normal"
+            avastha_str, " | ".join(flags) if flags else "Normal",
+            next_loc, next_ist, summary_str
         ])
 
     mo_kp = get_kp_full(mo_lon)
@@ -462,26 +551,27 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[2][1] = f"{mo_kp['nak']} (Ends: {fmt_local_ist(nak_end_dt)})"
     M[2][5] = "⭐ Tara Bala:"
     M[2][6] = f"{tara_name} ({tara_nat})"
-    M[2][9] = "🧭 Live Lagna:"
-    M[2][10] = f"{asc_kp['rashi']} [{asc_kp['tattva']}] ({fmt_local_ist(lagna_st)} - {fmt_local_ist(lagna_et)})"
+    M[2][9] = "🧭 Live Lagna (~2h):"
+    M[2][10] = f"{asc_kp['rashi']} [{asc_kp['tattva']}] ({fmt_local_ist(lagna_st)} - {fmt_local_ist(lagna_et)}) -> Next: {next_lagna_rashi}"
 
     M[3][0] = "🔮 SARVATOBHADRA (SBC):"
     M[3][2] = sbc_conclusion
     M[3][9] = "👑 TRINITY ALIGNMENT:"
     M[3][11] = trinity_verdict
 
-    # --- D1 & D9 DIAMOND CHARTS ---
-    M[13][2] = f"D1 Rashi Chart (Lagna SAV: {sav_points[asc_r_idx]})"
-    M[13][10] = "D9 Navamsha Chart"
+    # --- D1 & D9 KUNDLI CHARTS WITH SIGN NAME, SAV & PLANET DEGREES ---
+    M[13][2] = f"D1 Rashi Kundli (Lagna: {asc_kp['rashi']} | SAV: {sav_points[asc_r_idx]})"
+    M[13][10] = "D9 Navamsha Kundli"
     diamond_map = {
         1: (6, 3), 2: (5, 1), 3: (7, 0), 4: (9, 1), 5: (11, 0), 6: (12, 1),
         7: (11, 3), 8: (12, 5), 9: (11, 6), 10: (9, 5), 11: (7, 6), 12: (5, 5)
     }
     for h, (r_o, c_o) in diamond_map.items():
         r_idx_h = (asc_r_idx + h - 1) % 12
-        r9 = ((d9_asc_idx + h - 1) % 12) + 1
-        M[r_o][c_o] = f"[{r_idx_h+1}|SAV:{sav_points[r_idx_h]}] {' '.join(d1_houses[h])}"
-        M[r_o][c_o + 8] = f"[{r9}] {' '.join(d9_houses[h])}"
+        r_name_h = RASHIS[r_idx_h]
+        r9_idx = (d9_asc_idx + h - 1) % 12
+        M[r_o][c_o] = f"[{r_idx_h+1}-{r_name_h}|SAV:{sav_points[r_idx_h]}]\n{' '.join(d1_houses[h])}"
+        M[r_o][c_o + 8] = f"[{r9_idx+1}-{RASHIS[r9_idx]}]\n{' '.join(d9_houses[h])}"
 
     # --- MACRO PANCHANG & SAFETY FILTERS ---
     yog_idx = int(((su_lon + mo_lon) % 360.0) // (360.0 / 27.0))
@@ -506,8 +596,10 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[18][0], M[18][1] = "Rahu Kaal:", f"{fmt_local_ist(rk_start)} - {fmt_local_ist(rk_end)}"
     M[18][2], M[18][3] = "Gulika Kaal:", f"{fmt_local_ist(gk_start)} - {fmt_local_ist(gk_end)}"
 
-    # --- 12x12 ASPECT MATRIX ---
+    # --- 12x12 ASPECT MATRIX + EXACT NEXT ASPECT TIMING ---
     p_keys = list(planet_lons.keys())
+    M[19][0] = "⏱️ ASPECT TIMING:"
+    M[19][2] = get_next_aspect_timing(planet_lons, planet_speeds, dt_local)
     M[20][0] = "Aspect"
     for idx, pk in enumerate(p_keys):
         M[20][idx + 1] = pk
@@ -516,8 +608,12 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
             diff = min(abs(planet_lons[pk] - planet_lons[pk2]), 360.0 - abs(planet_lons[pk] - planet_lons[pk2]))
             M[21 + idx][jdx + 1] = f"{diff:.1f}"
 
-    # --- PLANETARY SHASTRA, SHADBALA & SAV TABLE ---
-    p_headers = ["Body", "Longitude", "Rasi", "Tattva", "Nakshatra(P)", "NL", "SL", "Speed", "Shadbala & SAV", "Baladi Avastha", "Dignity & Flags"]
+    # --- PLANETARY SHASTRA TABLE WITH NEXT CHANGE (LOC + IST) & TRADING SUMMARY ---
+    p_headers = [
+        "Body", "Longitude", "Rasi", "Tattva", "Nakshatra(P)", "NL", "SL", "Speed",
+        "Shadbala & SAV", "Baladi Avastha", "Dignity & Flags",
+        "Next Change (Local)", "Next Change (IST)", "Clear Trading Summary (With Reason)"
+    ]
     for ci, ht in enumerate(p_headers):
         M[34][ci] = ht
     for ri, pr in enumerate(planet_rows):
@@ -527,10 +623,9 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     return M
 
 # ==========================================
-# 5. QUOTA-SAFE ROLLING ENGINE & LIVE LOOP
+# 5. PROFESSIONAL STYLING, BORDERS & QUOTA-SAFE LOOP
 # ==========================================
 def safe_api_call(func, *args, **kwargs):
-    """Retries automatically if Google 60/min quota is ever touched."""
     for attempt in range(4):
         try:
             return func(*args, **kwargs)
@@ -540,6 +635,132 @@ def safe_api_call(func, *args, **kwargs):
                 time.sleep(65)
             else:
                 raise e
+
+def apply_professional_styling(ws):
+    """Applies institutional color-coding, Kundli borders, text wrap, and auto-fit."""
+    sheet_id = ws.id
+    requests = [
+        {
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 130, "startColumnIndex": 0, "endColumnIndex": 55},
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"fontFamily": "Roboto", "fontSize": 9},
+                        "verticalAlignment": "MIDDLE"
+                    }
+                },
+                "fields": "userEnteredFormat(textFormat,verticalAlignment)"
+            }
+        }
+    ]
+
+    quadrants = [(0, 0), (0, 26), (63, 0), (63, 26)]
+    header_colors = [
+        {"red": 0.11, "green": 0.27, "blue": 0.53}, # Mumbai - Royal Blue
+        {"red": 0.45, "green": 0.11, "blue": 0.35}, # Tokyo - Deep Magenta
+        {"red": 0.08, "green": 0.38, "blue": 0.25}, # London - Emerald Green
+        {"red": 0.18, "green": 0.20, "blue": 0.25}  # New York - Charcoal Slate
+    ]
+    solid_border = {"style": "SOLID_MEDIUM", "color": {"red": 0.25, "green": 0.25, "blue": 0.30}}
+    thin_border = {"style": "SOLID", "color": {"red": 0.70, "green": 0.72, "blue": 0.78}}
+
+    for idx, (r0, c0) in enumerate(quadrants):
+        bg_col = header_colors[idx]
+        # Top Exchange Banner
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": r0, "endRowIndex": r0 + 1, "startColumnIndex": c0, "endColumnIndex": c0 + 25},
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": bg_col,
+                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontSize": 10}
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"
+            }
+        })
+        # Sub-headers (Row +1)
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 1, "endRowIndex": r0 + 2, "startColumnIndex": c0, "endColumnIndex": c0 + 25},
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0.90, "green": 0.93, "blue": 0.98},
+                        "textFormat": {"bold": True}
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"
+            }
+        })
+        # D1 & D9 Kundli Chart Styling + Proper Kundli Borders
+        for chart_c in [c0, c0 + 8]:
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": sheet_id, "startRowIndex": r0 + 5, "endRowIndex": r0 + 13, "startColumnIndex": chart_c, "endColumnIndex": chart_c + 7},
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.90},
+                            "textFormat": {"bold": True, "fontSize": 8},
+                            "horizontalAlignment": "CENTER",
+                            "wrapStrategy": "WRAP"
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,wrapStrategy)"
+                }
+            })
+            requests.append({
+                "updateBorders": {
+                    "range": {"sheetId": sheet_id, "startRowIndex": r0 + 5, "endRowIndex": r0 + 13, "startColumnIndex": chart_c, "endColumnIndex": chart_c + 7},
+                    "top": solid_border, "bottom": solid_border, "left": solid_border, "right": solid_border,
+                    "innerHorizontal": thin_border, "innerVertical": thin_border
+                }
+            })
+        # Planetary Table Header (Row +34)
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 34, "endRowIndex": r0 + 35, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0.20, "green": 0.25, "blue": 0.33},
+                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"
+            }
+        })
+
+    cond_rules = [
+        ("🟢", {"red": 0.85, "green": 0.96, "blue": 0.87}, {"red": 0.05, "green": 0.40, "blue": 0.15}),
+        ("Mitra", {"red": 0.85, "green": 0.96, "blue": 0.87}, {"red": 0.05, "green": 0.40, "blue": 0.15}),
+        ("UCHHA", {"red": 0.85, "green": 0.96, "blue": 0.87}, {"red": 0.05, "green": 0.40, "blue": 0.15}),
+        ("TRINITY ALIGNED", {"red": 0.85, "green": 0.96, "blue": 0.87}, {"red": 0.05, "green": 0.40, "blue": 0.15}),
+        ("🔴", {"red": 0.99, "green": 0.86, "blue": 0.86}, {"red": 0.65, "green": 0.05, "blue": 0.05}),
+        ("Shatru", {"red": 0.99, "green": 0.86, "blue": 0.86}, {"red": 0.65, "green": 0.05, "blue": 0.05}),
+        ("NEECH", {"red": 0.99, "green": 0.86, "blue": 0.86}, {"red": 0.65, "green": 0.05, "blue": 0.05}),
+        ("👉", {"red": 1.0, "green": 0.94, "blue": 0.70}, {"red": 0.45, "green": 0.25, "blue": 0.0})
+    ]
+
+    for keyword, bg, fg in cond_rules:
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 130, "startColumnIndex": 0, "endColumnIndex": 55}],
+                    "booleanRule": {
+                        "condition": {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": keyword}]},
+                        "format": {"backgroundColor": bg, "textFormat": {"foregroundColor": fg, "bold": True}}
+                    }
+                },
+                "index": 0
+            }
+        })
+
+    requests.append({
+        "autoResizeDimensions": {
+            "dimensions": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 55}
+        }
+    })
+
+    safe_api_call(sheet.batch_update, {"requests": requests})
 
 def update_single_sheet(d, ws, is_live):
     title = d.strftime("%Y-%m-%d")
@@ -565,19 +786,23 @@ def run_live_engine():
             print(f"Deleted expired sheet: {title}")
             time.sleep(1.5)
             
-    # 2. Create missing static sheets (with 2.5s safe pause for Google Quota)
+    # 2. Create missing static sheets (with safe quota pause)
     today_ws = None
     for d in valid_dates:
         title = d.strftime("%Y-%m-%d")
         is_today = (d == today_ist)
         if title not in existing_sheets:
-            ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=50)
+            ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=55)
             update_single_sheet(d, ws, is_live=is_today)
-            time.sleep(2.5)
+            apply_professional_styling(ws)
+            time.sleep(3.0)
         else:
             ws = existing_sheets[title]
         if is_today:
             today_ws = ws
+
+    # Ensure today's sheet is always styled even if it already existed
+    apply_professional_styling(today_ws)
 
     # 3. Every 1-Minute Live Loop for Today's Sheet
     for minute_tick in range(LIVE_LOOP_MINUTES):
