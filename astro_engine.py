@@ -8,19 +8,24 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
-# 1. CONFIGURATION (ROLLING WINDOW & LIVE LOOP)
+# 1. CONFIGURATION & QUOTA-SAFE CONNECTION
 # ==========================================
 DAYS_BACK = 30
 DAYS_AHEAD = 18
-LIVE_LOOP_MINUTES = 14  # Runs every 60s for 14 mins per GitHub cycle
+LIVE_LOOP_MINUTES = 14  # Updates every 60s for 14 mins per GitHub cycle
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_dict = json.loads(os.environ["GCP_SA_KEY"])
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
-sheet = client.open_by_key(os.environ["SHEET_ID"])
 
-# Exchanges (Top-Left, Top-Right, Bottom-Left, Bottom-Right)
+# Clean Sheet ID automatically (handles full URL or extra spaces)
+raw_id = os.environ["SHEET_ID"].strip()
+if "/d/" in raw_id:
+    raw_id = raw_id.split("/d/")[1].split("/")[0]
+sheet = client.open_by_key(raw_id)
+
+# Exchanges Configuration (Top-Left, Top-Right, Bottom-Left, Bottom-Right)
 CITIES = {
     "Mumbai_NSE": {"lat": 19.0760, "lon": 72.8777, "tz": "Asia/Kolkata",     "row": 1,  "col": 1,  "janma_nak": 12}, # Hasta
     "Tokyo_TSE":  {"lat": 35.6762, "lon": 139.6503,"tz": "Asia/Tokyo",       "row": 1,  "col": 25, "janma_nak": 3},  # Rohini
@@ -46,7 +51,6 @@ TATTVA_MAP = {
     "Cn": "Watery (Jal)", "Sc": "Watery (Jal)", "Pi": "Watery (Jal)"
 }
 
-# Tithi Lords (1 to 30 cyclic sequence)
 TITHI_LORDS_SEQ = ["Su", "Mo", "Ma", "Me", "Ju", "Ve", "Sa", "Ra"]
 
 NAKSHATRAS = [
@@ -98,7 +102,6 @@ SHADBALA_REQ = {"Su": 6.5, "Mo": 6.0, "Ma": 5.0, "Me": 7.0, "Ju": 6.5, "Ve": 5.5
 NAISARGIKA_BALA = {"Su": 60.0, "Mo": 51.4, "Ve": 42.8, "Ju": 34.3, "Me": 25.7, "Ma": 17.1, "Sa": 8.6}
 COMBUST_ORBS = {"Mo": 12.0, "Ma": 17.0, "Me": 14.0, "Ju": 11.0, "Ve": 10.0, "Sa": 15.0}
 
-# Ashtakavarga Benefic Houses from each planet (Parashara Standard)
 BAV_RULES = {
     "Su": {"Su":[1,2,4,7,8,9,10,11], "Mo":[3,6,10,11], "Ma":[1,2,4,7,8,9,10,11], "Me":[3,5,6,9,10,11,12], "Ju":[5,6,9,11], "Ve":[6,7,12], "Sa":[1,2,4,7,8,9,10,11], "As":[3,4,6,10,11,12]},
     "Mo": {"Su":[3,6,7,8,10,11], "Mo":[1,3,6,7,10,11], "Ma":[2,3,5,6,9,10,11], "Me":[1,3,4,5,7,8,10,11], "Ju":[1,4,7,8,10,11,12], "Ve":[3,4,5,7,9,10,11], "Sa":[3,5,6,11], "As":[3,6,10,11]},
@@ -150,46 +153,32 @@ def get_baladi_avastha(rashi_num, deg_in_rashi):
     return ["Baal(25%)", "Kumar(50%)", "Yuva(100%)", "Vriddha(20%)", "Mrit(0%)"][max(0, min(4, idx))]
 
 def compute_shadbala_rupas(p_name, lon, speed, h_d1, is_day, su_lon, mo_lon):
-    """Computes quantitative Shadbala in Rupas (60 Shashtiamsas = 1 Rupa)."""
     if p_name not in SHADBALA_REQ:
         return "N/A"
-    # 1. Uchha Bala (0 to 60)
     uchha_pt = PARAM_UCHHA_DEG[p_name]
     neech_pt = (uchha_pt + 180.0) % 360.0
     dist_neech = min(abs(lon - neech_pt), 360.0 - abs(lon - neech_pt))
     uchha_bala = dist_neech / 3.0
-    
-    # 2. Kendra Bala (60, 30, 15)
     kendra_bala = 60.0 if h_d1 in [1, 4, 7, 10] else (30.0 if h_d1 in [2, 5, 8, 11] else 15.0)
     
-    # 3. Dig Bala (Directional)
     dig_targets = {"Me": 1, "Ju": 1, "Mo": 4, "Ve": 4, "Sa": 7, "Su": 10, "Ma": 10}
     diff_h = abs(h_d1 - dig_targets[p_name])
     if diff_h > 6: diff_h = 12 - diff_h
     dig_bala = (6 - diff_h) * 10.0
     
-    # 4. Kaala Bala (Day/Night + Paksha)
     day_strong = p_name in ["Su", "Ju", "Ve"]
     kaala_bala = 45.0 if (is_day == day_strong or p_name == "Me") else 15.0
     if p_name == "Mo":
         elong = (mo_lon - su_lon) % 360.0
         kaala_bala += (elong / 3.0) if elong <= 180 else ((360.0 - elong) / 3.0)
         
-    # 5. Cheshta Bala (Retrograde / Motional)
     cheshta_bala = 60.0 if speed < 0 else 30.0
-    
-    # 6. Naisargika Bala
     nais_bala = NAISARGIKA_BALA[p_name]
-    
-    # Approximate Total + Drik baseline in Rupas
     total_rupas = (uchha_bala + kendra_bala + dig_bala + kaala_bala + cheshta_bala + nais_bala + 45.0) / 60.0
-    req = SHADBALA_REQ[p_name]
-    ratio = total_rupas / req
-    tag = "STRONG" if ratio >= 1.0 else "WEAK"
-    return f"{total_rupas:.2f}R ({tag})"
+    tag = "STRONG" if (total_rupas / SHADBALA_REQ[p_name]) >= 1.0 else "WEAK"
+    return f"{total_rupas:.2f}R({tag})"
 
 def compute_sav_points(rashi_signs_dict):
-    """Computes Sarvashtakavarga (SAV) total points (out of 337) for all 12 signs."""
     sav = [0] * 12
     for target_p, rules in BAV_RULES.items():
         for source_p, houses in rules.items():
@@ -200,13 +189,12 @@ def compute_sav_points(rashi_signs_dict):
     return sav
 
 def evaluate_trinity_alignment(day_lord, tithi_lord, hora_lord):
-    """Checks Sovereign Trinity Alignment (Varesh + Tithi Lord + Hora Lord)."""
     f_tithi = (tithi_lord == day_lord) or (tithi_lord in MAITRI.get(day_lord, {}).get("friends", []))
     f_hora = (hora_lord == day_lord) or (hora_lord in MAITRI.get(day_lord, {}).get("friends", []))
     if f_tithi and f_hora:
-        return f"🔥 TRINITY ALIGNED ({day_lord}+{tithi_lord}+{hora_lord}): Sovereign Trend Expansion (Grade A+)"
+        return f"🔥 TRINITY ALIGNED ({day_lord}+{tithi_lord}+{hora_lord}): Grade A+ Trend Expansion"
     elif not f_tithi and not f_hora:
-        return f"⚠️ TRINITY CLASH ({day_lord} vs {tithi_lord}/{hora_lord}): High Trap / Mean-Reversion Only"
+        return f"⚠️ TRINITY CLASH ({day_lord} vs {tithi_lord}/{hora_lord}): Trap / Mean-Reversion Only"
     return f"⚖️ PARTIAL ALIGNMENT ({day_lord}/{tithi_lord}/{hora_lord}): Standard Technical Confluence"
 
 def get_kp_full(deg):
@@ -225,12 +213,12 @@ def get_kp_full(deg):
     rem_nak = deg - (nak_idx * nak_span)
     pada = int(rem_nak // (nak_span / 4.0)) + 1
     
-    curr, sl, sl_idx, rem_sl, sl_span = 0.0, nl, nl_idx, 0.0, 0.0
+    curr, sl = 0.0, nl
     for i in range(9):
         idx = (nl_idx + i) % 9
         span = (DASHA_YEARS[idx] / 120.0) * nak_span
         if curr <= rem_nak < (curr + span):
-            sl, sl_idx, rem_sl, sl_span = DASHA_LORDS[idx], idx, rem_nak - curr, span
+            sl = DASHA_LORDS[idx]
             break
         curr += span
         
@@ -348,7 +336,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     in_rahu = (rk_start <= dt_local <= rk_end)
     in_gulika = (gk_start <= dt_local <= gk_end)
 
-    # --- 24 HORA CALCULATION + SANDHI KAAL (FIRST 5M & LAST 5M) ---
+    # --- 24 HORA + SANDHI KAAL (FIRST 5M & LAST 5M) ---
     start_idx = HORA_SEQUENCE.index(day_lord)
     day_dur = (ss_dt - sr_dt) / 12.0
     night_dur = (nsr_dt - ss_dt) / 12.0
@@ -377,7 +365,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
         M[2 + i][21] = rel_str
         M[2 + i][22] = rule_str
 
-    # --- TOP EXCHANGE HEADER (Rows 0 to 4) ---
+    # --- TOP EXCHANGE HEADER ---
     M[0][0] = f"🌐 {city_name} ({cfg['tz']})"
     M[0][4] = f"LIVE: {fmt_local_ist(dt_local, '%d-%b %H:%M:%S')}"
     M[0][10] = f"Dinmaan: {dinmaan_mins:.1f}m | 1 Hora: {dinmaan_mins/12.0:.1f}m"
@@ -458,7 +446,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
             " | ".join(flags) if flags else "Normal"
         ])
 
-    # Moon Nakshatra, End Time, Tara Bala, SBC & Trinity Alignment
     mo_kp = get_kp_full(mo_lon)
     nak_end_dt = get_nakshatra_end_time(dt_local)
     tara_idx = ((mo_kp["nak_idx"] - cfg["janma_nak"]) % 27) % 9
@@ -483,7 +470,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[3][9] = "👑 TRINITY ALIGNMENT:"
     M[3][11] = trinity_verdict
 
-    # --- D1 & D9 DIAMOND CHARTS (Rows 5 to 13) ---
+    # --- D1 & D9 DIAMOND CHARTS ---
     M[13][2] = f"D1 Rashi Chart (Lagna SAV: {sav_points[asc_r_idx]})"
     M[13][10] = "D9 Navamsha Chart"
     diamond_map = {
@@ -496,7 +483,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
         M[r_o][c_o] = f"[{r_idx_h+1}|SAV:{sav_points[r_idx_h]}] {' '.join(d1_houses[h])}"
         M[r_o][c_o + 8] = f"[{r9}] {' '.join(d9_houses[h])}"
 
-    # --- MACRO PANCHANG & SAFETY FILTERS (Rows 15 to 19) ---
+    # --- MACRO PANCHANG & SAFETY FILTERS ---
     yog_idx = int(((su_lon + mo_lon) % 360.0) // (360.0 / 27.0))
     yog_name, yog_nat = YOGAS[yog_idx]
     karana_name, bhadra_vaas = get_karana_and_bhadra(tithi_deg, mo_kp["rashi"])
@@ -519,7 +506,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[18][0], M[18][1] = "Rahu Kaal:", f"{fmt_local_ist(rk_start)} - {fmt_local_ist(rk_end)}"
     M[18][2], M[18][3] = "Gulika Kaal:", f"{fmt_local_ist(gk_start)} - {fmt_local_ist(gk_end)}"
 
-    # --- 12x12 ASPECT MATRIX (Rows 20 to 32) ---
+    # --- 12x12 ASPECT MATRIX ---
     p_keys = list(planet_lons.keys())
     M[20][0] = "Aspect"
     for idx, pk in enumerate(p_keys):
@@ -529,7 +516,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
             diff = min(abs(planet_lons[pk] - planet_lons[pk2]), 360.0 - abs(planet_lons[pk] - planet_lons[pk2]))
             M[21 + idx][jdx + 1] = f"{diff:.1f}"
 
-    # --- PLANETARY SHASTRA, SHADBALA & SAV TABLE (Rows 34 to 46) ---
+    # --- PLANETARY SHASTRA, SHADBALA & SAV TABLE ---
     p_headers = ["Body", "Longitude", "Rasi", "Tattva", "Nakshatra(P)", "NL", "SL", "Speed", "Shadbala & SAV", "Baladi Avastha", "Dignity & Flags"]
     for ci, ht in enumerate(p_headers):
         M[34][ci] = ht
@@ -540,8 +527,20 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     return M
 
 # ==========================================
-# 5. ROLLING SHEET + 1-MINUTE LIVE LOOP
+# 5. QUOTA-SAFE ROLLING ENGINE & LIVE LOOP
 # ==========================================
+def safe_api_call(func, *args, **kwargs):
+    """Retries automatically if Google 60/min quota is ever touched."""
+    for attempt in range(4):
+        try:
+            return func(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e):
+                print("Quota limit hit (429), pausing 65s to reset...")
+                time.sleep(65)
+            else:
+                raise e
+
 def update_single_sheet(d, ws, is_live):
     title = d.strftime("%Y-%m-%d")
     batch_updates = []
@@ -550,29 +549,31 @@ def update_single_sheet(d, ws, is_live):
         start_a1 = gspread.utils.rowcol_to_a1(cfg["row"], cfg["col"])
         end_a1 = gspread.utils.rowcol_to_a1(cfg["row"] + len(matrix) - 1, cfg["col"] + len(matrix[0]) - 1)
         batch_updates.append({"range": f"{start_a1}:{end_a1}", "values": matrix})
-    ws.batch_update(batch_updates, value_input_option="USER_ENTERED")
+    safe_api_call(ws.batch_update, batch_updates, value_input_option="USER_ENTERED")
     print(f"[{datetime.datetime.now(IST_TZ).strftime('%H:%M:%S')}] Updated {'LIVE' if is_live else 'STATIC'}: {title}")
 
 def run_live_engine():
     today_ist = datetime.datetime.now(IST_TZ).date()
     valid_dates = [today_ist + datetime.timedelta(days=i) for i in range(-DAYS_BACK, DAYS_AHEAD + 1)]
     valid_titles = {d.strftime("%Y-%m-%d") for d in valid_dates}
-    existing_sheets = {ws.title: ws for ws in sheet.worksheets()}
+    existing_sheets = {ws.title: ws for ws in safe_api_call(sheet.worksheets)}
     
     # 1. Cleanup expired sheets
     for title, ws in existing_sheets.items():
         if title not in valid_titles and len(existing_sheets) > 1:
-            sheet.del_worksheet(ws)
-            print(f"Deleted old sheet: {title}")
+            safe_api_call(sheet.del_worksheet, ws)
+            print(f"Deleted expired sheet: {title}")
+            time.sleep(1.5)
             
-    # 2. Create missing static sheets
+    # 2. Create missing static sheets (with 2.5s safe pause for Google Quota)
     today_ws = None
     for d in valid_dates:
         title = d.strftime("%Y-%m-%d")
         is_today = (d == today_ist)
         if title not in existing_sheets:
-            ws = sheet.add_worksheet(title=title, rows=130, cols=50)
+            ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=50)
             update_single_sheet(d, ws, is_live=is_today)
+            time.sleep(2.5)
         else:
             ws = existing_sheets[title]
         if is_today:
