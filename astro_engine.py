@@ -229,7 +229,6 @@ def get_kp_full(deg):
     }
 
 def calculate_planet_next_change(p_name, deg_in_rashi, speed, dt_local):
-    """Calculates exact Local & IST date-time when planet changes Rashi/Pada."""
     if abs(speed) < 0.0001:
         return "Stationary (0 spd)", "Stationary (0 spd)"
     rem_deg = (30.0 - deg_in_rashi) if speed > 0 else deg_in_rashi
@@ -254,7 +253,6 @@ def calculate_planet_next_change(p_name, deg_in_rashi, speed, dt_local):
     return loc_s, ist_s
 
 def build_planet_trading_summary(p_name, kp, flags, avastha, is_strong, sav_val):
-    """Generates clear institutional trading verdict with exact astrological reason."""
     reasons = []
     if "SANDHI" in flags:
         reasons.append("Rashi Sandhi (29°-1°): Extreme Whipsaw & Stop-Hunt Risk")
@@ -280,7 +278,6 @@ def build_planet_trading_summary(p_name, kp, flags, avastha, is_strong, sav_val)
     return " | ".join(reasons[:2])
 
 def get_next_aspect_timing(planet_lons, planet_speeds, dt_local):
-    """Finds the fastest approaching exact aspect (0, 60, 90, 120, 180) driven by Moon."""
     mo_lon = planet_lons["Mo"]
     mo_spd = planet_speeds["Mo"]
     targets = [0, 60, 90, 120, 180]
@@ -858,22 +855,31 @@ def run_live_engine():
             print(f"Deleted expired sheet: {title}")
             time.sleep(1.5)
             
-    # 2. Create missing static sheets (with safe quota pause)
+    # 2. Create missing OR upgrade ANY sheet that is empty or lacks the new IST + Colourful layout
     today_ws = None
     for d in valid_dates:
         title = d.strftime("%Y-%m-%d")
         is_today = (d == today_ist)
+        
         if title not in existing_sheets:
             ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=55)
             update_single_sheet(d, ws, is_live=is_today)
             apply_professional_styling(ws)
-            time.sleep(3.0)
+            time.sleep(3.5)
         else:
             ws = existing_sheets[title]
+            # Check cell U2 (which holds 'Start(IST)' in the new colourful layout)
+            u2_val = safe_api_call(ws.acell, "U2").value
+            if u2_val != "Start(IST)":
+                print(f"Upgrading & colouring sheet: {title}")
+                update_single_sheet(d, ws, is_live=is_today)
+                apply_professional_styling(ws)
+                time.sleep(3.5)
+                
         if is_today:
             today_ws = ws
 
-    # Ensure today's sheet is always styled and resized cleanly
+    # Ensure today's sheet always gets fresh styling & 1-minute live updates
     apply_professional_styling(today_ws)
 
     # 3. Every 1-Minute Live Loop for Today's Sheet
