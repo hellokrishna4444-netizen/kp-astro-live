@@ -12,7 +12,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 # 1. CONFIGURATION & QUOTA-SAFE CONNECTION
 # ==========================================
-LIVE_LOOP_MINUTES = 55  # Runs every 60s for 55 mins continuously per cycle
+DAYS_BACK = 30
+DAYS_AHEAD = 18
+LIVE_LOOP_MINUTES = 14  # Runs every 60s for 14 mins per GitHub cycle
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_dict = json.loads(os.environ["GCP_SA_KEY"])
@@ -22,17 +24,7 @@ client = gspread.authorize(creds)
 raw_id = os.environ["SHEET_ID"].strip()
 if "/d/" in raw_id:
     raw_id = raw_id.split("/d/")[1].split("/")[0]
-
-sheet = None
-for attempt in range(5):
-    try:
-        sheet = client.open_by_key(raw_id)
-        break
-    except Exception as e:
-        print(f"Attempt {attempt+1}/5: Google Sheet open glitch, retrying in 15s... ({e})")
-        time.sleep(15)
-if sheet is None:
-    raise RuntimeError("Could not open Google Sheet after 5 attempts. Check SHEET_ID secret.")
+sheet = client.open_by_key(raw_id)
 
 # Exchanges Configuration (25-column wide quadrants + Exchange Janma Nakshatra)
 CITIES = {
@@ -309,7 +301,7 @@ def build_planet_trading_summary(p_name, kp, flags, avastha, is_strong, sav_val)
         reasons.append(f"SAV:{sav_val}(Fragile Zone)")
         
     if not reasons:
-        return f"Normal ({kp['tattva']}): Confluence via {kp['nl']}/{kp['sl']}/{kp['ssl']}"
+        return f"Normal ({kp['tattva']}): Standard Technical Confluence via {kp['nl']}/{kp['sl']}"
     return " | ".join(reasons[:2])
 
 def get_next_aspect_timing(planet_lons, planet_speeds, dt_local):
@@ -573,7 +565,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     
     planet_rows = [[
         "As", deg_to_dms(asc_deg), asc_kp["rashi"], asc_kp["tattva"], asc_kp["nak"],
-        asc_kp["nl"], asc_kp["sl"], asc_kp["ssl"], "0.00", f"SAV:{sav_points[asc_r_idx]}", "Lagna (~2h)", "Active Horizon",
+        asc_kp["nl"], asc_kp["sl"], "0.00", f"SAV:{sav_points[asc_r_idx]}", "Lagna (~2h)", "Active Horizon",
         f"Next {next_lagna_rashi}: {lagna_et.strftime('%I:%M %p')}",
         f"{lagna_et.astimezone(IST_TZ).strftime('%I:%M %p')} IST",
         f"{asc_kp['rashi']} [{asc_kp['tattva']}] active till {lagna_et.strftime('%I:%M %p')}; then {next_lagna_rashi} [{next_lagna_tattva}]"
@@ -611,7 +603,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
         
         planet_rows.append([
             p_name, deg_to_dms(lon), kp["rashi"], kp["tattva"], f"{kp['nak']}({kp['pada']})",
-            kp["nl"], kp["sl"], kp["ssl"], f"{speed:.2f}", f"{shadbala_str} | {sav_tag}",
+            kp["nl"], kp["sl"], f"{speed:.2f}", f"{shadbala_str} | {sav_tag}",
             avastha_str, " | ".join(flags) if flags else "Normal",
             next_loc, next_ist, summary_str
         ])
@@ -695,9 +687,9 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
             diff = min(abs(planet_lons[pk] - planet_lons[pk2]), 360.0 - abs(planet_lons[pk] - planet_lons[pk2]))
             M[21 + idx][jdx + 1] = f"{diff:.1f}"
 
-    # --- PLANETARY SHASTRA TABLE (With SSL Column) ---
+    # --- PLANETARY SHASTRA TABLE ---
     p_headers = [
-        "Body", "Longitude", "Rasi", "Tattva", "Nakshatra(P)", "NL", "SL", "SSL", "Speed",
+        "Body", "Longitude", "Rasi", "Tattva", "Nakshatra(P)", "NL", "SL", "Speed",
         "Shadbala & SAV", "Baladi Avastha", "Dignity & Flags",
         "Next Change (Local)", "Next Change (IST)", "Clear Trading Summary (With Reason)"
     ]
@@ -711,7 +703,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     return M, guru_extras
 
 # ==========================================
-# 5. SINGLE-ALERT HINDI & OVERLAP AI BOT
+# 5. BULLETPROOF HINDI & OVERLAP AI BOT
 # ==========================================
 def send_telegram_alert(message_text):
     """Sends clean, easy-to-read Hindi analysis (without raw * or # symbols) to all authorized Chat IDs."""
@@ -723,6 +715,7 @@ def send_telegram_alert(message_text):
     chat_ids = [cid.strip() for cid in raw_chats.split(",") if cid.strip()]
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     
+    # Remove raw markdown asterisks and hashtags for clean newspaper-style reading
     clean_text = re.sub(r'[*#]', '', message_text)
     chunks = [clean_text[i:i+3900] for i in range(0, len(clean_text), 3900)]
     for cid in chat_ids:
@@ -749,7 +742,7 @@ def extract_city_snapshot(city_name, matrix, guru_extras):
                 next_hora = f"H#{matrix[r+1][17]} | Loc: {matrix[r+1][18]}-{matrix[r+1][19]} | IST: {matrix[r+1][20]}-{matrix[r+1][21]} | Lord: {matrix[r+1][22]} ({matrix[r+1][23]}) -> {matrix[r+1][24]}"
             break
 
-    planets = [" | ".join([c for c in matrix[r][0:15] if c]) for r in range(35, 48)]
+    planets = [" | ".join([c for c in matrix[r][0:14] if c]) for r in range(35, 48)]
     return f"""
 ====================
 EXCHANGE: {city_name}
@@ -803,7 +796,7 @@ def call_gemini_analyst(prompt_text):
     return f"⚠️ Gemini API Error ({last_err[:140]}): कृपया Google AI Studio से नई API Key बनाकर GEMINI_API_KEY Secret अपडेट करें।"
 
 def check_and_send_session_alerts(target_date):
-    """Sends ONLY 1 clean Hindi alert per new Hora start & ~2-Hr Lagna shift."""
+    """Bulletproof Session-Only Alert Engine in pure Hindi with Cross-Exchange Lagna/SAV Comparison."""
     active_snapshots = {}
     trigger_reasons = {}
 
@@ -820,18 +813,32 @@ def check_and_send_session_alerts(target_date):
         reasons = []
         
         curr_h_num = "0"
+        mins_left_hora = 99.0
         for r in range(2, 26):
             if "👉" in str(matrix[r][17]):
                 curr_h_num = str(matrix[r][17]).replace("👉", "").strip()
+                end_dt = tz.localize(datetime.datetime.combine(
+                    now_loc.date(), datetime.datetime.strptime(matrix[r][19], "%I:%M %p").time()
+                ))
+                if end_dt < now_loc:
+                    end_dt += datetime.timedelta(days=1)
+                mins_left_hora = (end_dt - now_loc).total_seconds() / 60.0
                 break
 
-        # 1. Single Guaranteed Alert when each new Active Hora begins
+        # 1. Guaranteed Alert for Current Active Hora
         hora_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_H{curr_h_num}"
         if hora_key not in SENT_STATE_TRACKER:
             SENT_STATE_TRACKER.add(hora_key)
             reasons.append(f"⏰ सक्रिय होरा #{curr_h_num} विश्लेषण")
 
-        # 2. Single Alert 5 mins before ~2-Hr Lagna Shift
+        # 2. Pre-Alert 5 mins before Next Hora starts
+        if 0.5 <= mins_left_hora <= 5.5:
+            pre_hora_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_PRE_H{curr_h_num}"
+            if pre_hora_key not in SENT_STATE_TRACKER:
+                SENT_STATE_TRACKER.add(pre_hora_key)
+                reasons.append("🔔 अगली होरा बदलाव (5 मिनट में)")
+
+        # 3. Guaranteed Alert for ~2-Hr Lagna Shift
         _, lagna_et, next_lagna_rashi, next_lagna_tattva = get_current_lagna_window(now_loc, cfg["lat"], cfg["lon"])
         lagna_mins_left = (lagna_et - now_loc).total_seconds() / 60.0
         if 0.5 <= lagna_mins_left <= 5.5:
@@ -863,8 +870,8 @@ def check_and_send_session_alerts(target_date):
                 सटीक IST और Local समय के साथ इन 5 बिंदुओं में पूरा विवरण दें:
                 1. 🔥 ओवरलैप और सटीक समय रोडमैप ({ex1} + {ex2} — Local और IST): बताएं कि पहले एक्सचेंज के स्थानीय लग्न/SAV/जन्म नक्षत्र में रुका हुआ वॉल्यूम दूसरे एक्सचेंज के लग्न और 10वें भाव के खुलते ही कैसे कंसोलिडेट होकर बड़ा विस्फोटक मूव बनाएगा।
                 2. 🧬 3-लेयर KP चेन और रूलिंग प्लैनेट्स: Hora Lord -> NL -> SL -> 3rd-level SSL, षड्बल/SAV ताकत, बालादि अवस्था, और KP Ruling Planets (वक्री/संधि जांच) का गहरा विश्लेषण।
-                3. 🥇 GOLD (XAUUSD) सटीक फैसला: दिशा (Trend या Trap/Reversal), लिक्विडिटी स्वीप की संभावना, और ग्रहों का ठोस कारण (सूर्य/गुरु + Sub-Lords/SSL + OOB जांच)।
-                4. 🥈 SILVER (XAGUSD) सटीक फैसला: उतार-चढ़ाव (Volatility), अचानक स्पाइक का खतरा, और ग्रहों का ठोस कारण (चंद्रमा/शुक्र + Sub-Lords/SSL)।
+                3. 🥇 GOLD (XAUUSD) सटीक फैसला: दिशा (Trend या Trap/Reversal), लिक्विडिटी स्वीप की संभावना, और ग्रहों का ठोस कारण (सूर्य/गुरु + Sub-Lords + OOB जांच)।
+                4. 🥈 SILVER (XAGUSD) सटीक फैसला: उतार-चढ़ाव (Volatility), अचानक स्पाइक का खतरा, और ग्रहों का ठोस कारण (चंद्रमा/शुक्र + Sub-Lords)।
                 5. 🛑 सख्त ट्रैप और सुरक्षा फिल्टर: Hora Sandhi Freeze (शुरुआती और आखिरी 5 मिनट), राहु/गुलिक काल, SBC वेध, और अगले सटीक Aspect Hit का मिनट-दर-मिनट समय।
                 """
                 verdict = call_gemini_analyst(prompt)
@@ -876,7 +883,7 @@ def check_and_send_session_alerts(target_date):
     # 2. SINGLE ACTIVE SESSION ALERTS (Mumbai NSE Index/Stocks OR Standalone Tokyo / London / NY)
     for city, trig_label in trigger_reasons.items():
         asset_focus = (
-            "3. 📈 NIFTY / BANKNIFTY / NSE INDEX सटीक फैसला: दिशा, संस्थागत प्रवाह (Institutional Flow), और ग्रहों का ठोस कारण (सूर्य/बुध/गुरु + Sub-Lords/SSL)।"
+            "3. 📈 NIFTY / BANKNIFTY / NSE INDEX सटीक फैसला: दिशा, संस्थागत प्रवाह (Institutional Flow), और ग्रहों का ठोस कारण (सूर्य/बुध/गुरु + Sub-Lords)।"
             if city == "Mumbai_NSE" else
             "3. 🥇 GOLD (XAUUSD) और 🥈 SILVER (XAGUSD) का अलग-अलग सटीक फैसला: दोनों की संभावित चाल और सटीक ज्योतिषीय कारण विस्तार से बताएं।"
         )
@@ -898,16 +905,16 @@ def check_and_send_session_alerts(target_date):
             send_telegram_alert(verdict)
 
 # ==========================================
-# 6. TODAY-ONLY EVERY-MINUTE SHEET SYNC & LIVE BOT LOOP
+# 6. PROFESSIONAL STYLING, BORDERS & QUOTA-SAFE LOOP
 # ==========================================
 def safe_api_call(func, *args, **kwargs):
     for attempt in range(4):
         try:
             return func(*args, **kwargs)
         except gspread.exceptions.APIError as e:
-            if "429" in str(e) or "400" in str(e):
-                print(f"Google API transient pause ({e}), retrying in 30s...")
-                time.sleep(30)
+            if "429" in str(e):
+                print("Quota limit hit (429), pausing 65s to reset...")
+                time.sleep(65)
             else:
                 raise e
 
@@ -939,9 +946,9 @@ def apply_professional_styling(ws):
     thin_border = {"style": "SOLID", "color": {"red": 0.70, "green": 0.72, "blue": 0.78}}
 
     col_widths = [
-        (0, 75), (1, 95), (2, 65), (3, 110), (4, 125), (5, 50), (6, 50), (7, 50),
-        (8, 65), (9, 165), (10, 105), (11, 150), (12, 175), (13, 175), (14, 340),
-        (15, 35), (16, 25), (17, 55), (18, 85), (19, 85), (20, 85), (21, 85),
+        (0, 75), (1, 95), (2, 65), (3, 110), (4, 125), (5, 55), (6, 55), (7, 65),
+        (8, 165), (9, 105), (10, 150), (11, 175), (12, 175), (13, 340), (14, 45),
+        (15, 45), (16, 25), (17, 55), (18, 85), (19, 85), (20, 85), (21, 85),
         (22, 55), (23, 135), (24, 195)
     ]
 
@@ -978,21 +985,21 @@ def apply_professional_styling(ws):
             })
         requests.append({
             "repeatCell": {
-                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 34, "endRowIndex": r0 + 35, "startColumnIndex": c0, "endColumnIndex": c0 + 15},
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 34, "endRowIndex": r0 + 35, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
                 "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.20, "green": 0.25, "blue": 0.33}, "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}, "wrapStrategy": "WRAP"}},
                 "fields": "userEnteredFormat(backgroundColor,textFormat,wrapStrategy)"
             }
         })
         requests.append({
             "repeatCell": {
-                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 35, "endRowIndex": r0 + 48, "startColumnIndex": c0, "endColumnIndex": c0 + 15},
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 35, "endRowIndex": r0 + 48, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
                 "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP", "verticalAlignment": "MIDDLE"}},
                 "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"
             }
         })
         requests.append({
             "updateBorders": {
-                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 34, "endRowIndex": r0 + 48, "startColumnIndex": c0, "endColumnIndex": c0 + 15},
+                "range": {"sheetId": sheet_id, "startRowIndex": r0 + 34, "endRowIndex": r0 + 48, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
                 "top": solid_border, "bottom": solid_border, "left": solid_border, "right": solid_border,
                 "innerHorizontal": thin_border, "innerVertical": thin_border
             }
@@ -1057,23 +1064,43 @@ def update_single_sheet(d, ws, is_live):
         end_a1 = gspread.utils.rowcol_to_a1(cfg["row"] + len(matrix) - 1, cfg["col"] + len(matrix[0]) - 1)
         batch_updates.append({"range": f"{start_a1}:{end_a1}", "values": matrix})
     safe_api_call(ws.batch_update, batch_updates, value_input_option="USER_ENTERED")
-    print(f"[{datetime.datetime.now(IST_TZ).strftime('%H:%M:%S')}] Updated LIVE Today Sheet: {title}")
+    print(f"[{datetime.datetime.now(IST_TZ).strftime('%H:%M:%S')}] Updated {'LIVE' if is_live else 'STATIC'}: {title}")
 
 def run_live_engine():
     today_ist = datetime.datetime.now(IST_TZ).date()
-    today_title = today_ist.strftime("%Y-%m-%d")
+    valid_dates = [today_ist + datetime.timedelta(days=i) for i in range(-DAYS_BACK, DAYS_AHEAD + 1)]
+    valid_titles = {d.strftime("%Y-%m-%d") for d in valid_dates}
+    existing_sheets = {ws.title: ws for ws in safe_api_call(sheet.worksheets)}
     
-    # Only fetches/creates Today's Sheet (no bulk 49-sheet scan!)
-    try:
-        today_ws = safe_api_call(sheet.worksheet, today_title)
-        h35_val = safe_api_call(today_ws.acell, "H35").value
-        if h35_val != "SSL":
-            apply_professional_styling(today_ws)
-    except gspread.exceptions.WorksheetNotFound:
-        today_ws = safe_api_call(sheet.add_worksheet, title=today_title, rows=130, cols=55)
-        apply_professional_styling(today_ws)
+    # 1. Cleanup expired sheets
+    for title, ws in existing_sheets.items():
+        if title not in valid_titles and len(existing_sheets) > 1:
+            safe_api_call(sheet.del_worksheet, ws)
+            time.sleep(1.5)
+            
+    # 2. Create missing OR upgrade ANY sheet lacking the new IST + Colourful layout
+    today_ws = None
+    for d in valid_dates:
+        title = d.strftime("%Y-%m-%d")
+        is_today = (d == today_ist)
+        if title not in existing_sheets:
+            ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=55)
+            update_single_sheet(d, ws, is_live=is_today)
+            apply_professional_styling(ws)
+            time.sleep(3.5)
+        else:
+            ws = existing_sheets[title]
+            u2_val = safe_api_call(ws.acell, "U2").value
+            if u2_val != "Start(IST)":
+                update_single_sheet(d, ws, is_live=is_today)
+                apply_professional_styling(ws)
+                time.sleep(3.5)
+        if is_today:
+            today_ws = ws
 
-    # Every 1-Minute Live Loop ONLY for Today's Sheet + Single-Alert Hindi Telegram Bot
+    apply_professional_styling(today_ws)
+
+    # 3. Every 1-Minute Live Loop for Today's Sheet + Session-Only Deep Hindi AI Telegram Bot
     for minute_tick in range(LIVE_LOOP_MINUTES):
         update_single_sheet(today_ist, today_ws, is_live=True)
         check_and_send_session_alerts(today_ist)
