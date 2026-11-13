@@ -24,17 +24,20 @@ creds_dict = json.loads(os.environ["GCP_SA_KEY"])
 creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
 client = gspread.authorize(creds)
 
-raw_id = os.environ["SHEET_ID"].strip()
-if "/d/" in raw_id:
-    raw_id = raw_id.split("/d/")[1].split("/")[0]
-
 def connect_sheet():
     for attempt in range(4):
         try:
-            return client.open_by_key(raw_id)
-        except Exception as e:
-            print(f"Sheet connect attempt {attempt+1}/4 paused: {e}")
-            time.sleep(10)
+            # पहले सीधे नाम से शीट खोलेगा (कोई ID गलती नहीं होगी)
+            return client.open("Live KP 2026")
+        except Exception as e1:
+            try:
+                raw_id = os.environ.get("SHEET_ID", "").strip()
+                if "/d/" in raw_id:
+                    raw_id = raw_id.split("/d/")[1].split("/")[0]
+                return client.open_by_key(raw_id)
+            except Exception as e2:
+                print(f"Sheet connect attempt {attempt+1}/4 paused: {e1} | {e2}")
+                time.sleep(10)
     return None
 
 sheet = connect_sheet()
@@ -1079,14 +1082,7 @@ def run_live_engine():
     if sheet is not None:
         existing_sheets = {ws.title: ws for ws in safe_api_call(sheet.worksheets) or []}
 
-        # 1. Auto-delete oldest sheet beyond 15 days back (keeps rolling 31-day window)
-        for title, ws in existing_sheets.items():
-            if title not in valid_titles and len(existing_sheets) > 1:
-                safe_api_call(sheet.del_worksheet, ws)
-                print(f"Auto-deleted expired sheet: {title}")
-                time.sleep(1.5)
-
-        # 2. Create ONLY missing sheets (like new 15th day ahead) & apply colors ONCE
+        # 1. Create missing sheets FIRST (so at least 1 valid sheet exists before deleting Sheet1)
         for d in valid_dates:
             title = d.strftime("%Y-%m-%d")
             is_today = (d == today_ist)
@@ -1094,11 +1090,20 @@ def run_live_engine():
                 ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=55)
                 update_single_sheet(d, ws, is_live=is_today)
                 apply_professional_styling(ws)  # Colors applied ONLY ONCE when sheet is created
+                existing_sheets[title] = ws
                 time.sleep(2.5)
             else:
                 ws = existing_sheets[title]
             if is_today:
                 today_ws = ws
+
+        # 2. Auto-delete expired sheets & default Sheet1 beyond 15-day window
+        for title, ws in list(existing_sheets.items()):
+            if title not in valid_titles and len(existing_sheets) > 1:
+                safe_api_call(sheet.del_worksheet, ws)
+                del existing_sheets[title]
+                print(f"Auto-deleted expired/default sheet: {title}")
+                time.sleep(1.5)
 
     # 3. Every 1-Minute Live Loop ONLY for Today's Sheet (Colors update ONLY on NL/SL/SSL event!)
     for minute_tick in range(LIVE_LOOP_MINUTES):
