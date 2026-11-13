@@ -12,7 +12,9 @@ from google.oauth2.service_account import Credentials
 # ==========================================
 # 1. CONFIGURATION & MODERN GOOGLE SHEETS V4 CONNECTION
 # ==========================================
-LIVE_LOOP_MINUTES = 55  # Runs every 60s for 55 mins continuously per cycle
+DAYS_BACK = 15          # प्रैक्टिस के लिए 15 दिन पीछे
+DAYS_AHEAD = 15         # प्रैक्टिस के लिए 15 दिन आगे
+LIVE_LOOP_MINUTES = 55  # हर घंटे 55 मिनट तक लगातार लाइव लूप
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -26,16 +28,16 @@ raw_id = os.environ["SHEET_ID"].strip()
 if "/d/" in raw_id:
     raw_id = raw_id.split("/d/")[1].split("/")[0]
 
-sheet = None
-for attempt in range(5):
-    try:
-        sheet = client.open_by_key(raw_id)
-        break
-    except Exception as e:
-        print(f"Attempt {attempt+1}/5: Google Sheet open glitch, retrying in 15s... ({e})")
-        time.sleep(15)
-if sheet is None:
-    raise RuntimeError("Could not open Google Sheet after 5 attempts. Check SHEET_ID secret.")
+def connect_sheet():
+    for attempt in range(4):
+        try:
+            return client.open_by_key(raw_id)
+        except Exception as e:
+            print(f"Sheet connect attempt {attempt+1}/4 paused: {e}")
+            time.sleep(10)
+    return None
+
+sheet = connect_sheet()
 
 # Exchanges Configuration (25-column wide quadrants + Exchange Janma Nakshatra)
 CITIES = {
@@ -55,6 +57,7 @@ SESSION_WINDOWS_LOCAL = {
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
 SENT_STATE_TRACKER = set()
+LAST_KP_CHAIN_STATE = {}  # Tracks NL-SL-SSL changes to trigger color refresh only on event
 
 # ==========================================
 # 2. SHASTRA TABLES & CONSTANTS
@@ -496,7 +499,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     in_rahu = (rk_start <= dt_local <= rk_end)
     in_gulika = (gk_start <= dt_local <= gk_end)
 
-    # --- 24 HORA WITH SEPARATE LOCAL & IST START/END COLUMNS (Cols 17 to 24) ---
     start_idx = HORA_SEQUENCE.index(day_lord)
     day_dur = (ss_dt - sr_dt) / 12.0
     night_dur = (nsr_dt - ss_dt) / 12.0
@@ -525,7 +527,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
         M[2 + i][23] = rel_str
         M[2 + i][24] = rule_str
 
-    # --- TOP EXCHANGE HEADER ---
     M[0][0] = f"🌐 {city_name} ({cfg['tz']})"
     M[0][4] = f"LIVE: {fmt_local_ist(dt_local, '%d-%b %H:%M:%S')}"
     M[0][10] = f"Dinmaan: {dinmaan_mins:.1f}m | 1 Hora: {dinmaan_mins/12.0:.1f}m"
@@ -541,7 +542,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[1][8] = f"Varesh: {day_lord}"
     M[1][10] = get_varesh_summary(day_lord)
 
-    # --- PLANETS, ASCENDANT (~2 HR LAGNA WINDOW), SHADBALA & SAV ---
     _, ascmc = swe.houses_ex(jd, cfg["lat"], cfg["lon"], b'P', swe.FLG_SIDEREAL)
     asc_deg = ascmc[0] % 360.0
     asc_kp = get_kp_full(asc_deg)
@@ -643,7 +643,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[3][9] = "👑 TRINITY ALIGNMENT:"
     M[3][11] = trinity_verdict
 
-    # --- D1 & D9 KUNDLI CHARTS ---
     M[13][2] = f"D1 Rashi Kundli (Lagna: {asc_kp['rashi']} | SAV: {sav_points[asc_r_idx]})"
     M[13][10] = "D9 Navamsha Kundli"
     diamond_map = {
@@ -657,7 +656,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
         M[r_o][c_o] = f"[{r_idx_h+1}-{r_name_h}|SAV:{sav_points[r_idx_h]}]\n{' '.join(d1_houses[h])}"
         M[r_o][c_o + 8] = f"[{r9_idx+1}-{RASHIS[r9_idx]}]\n{' '.join(d9_houses[h])}"
 
-    # --- MACRO PANCHANG & SAFETY FILTERS ---
     yog_idx = int(((su_lon + mo_lon) % 360.0) // (360.0 / 27.0))
     yog_name, yog_nat = YOGAS[yog_idx]
     karana_name, bhadra_vaas = get_karana_and_bhadra(tithi_deg, mo_kp["rashi"])
@@ -686,7 +684,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[18][0], M[18][1] = "Rahu Kaal:", f"{fmt_local_ist(rk_start)} - {fmt_local_ist(rk_end)}"
     M[18][2], M[18][3] = "Gulika Kaal:", f"{fmt_local_ist(gk_start)} - {fmt_local_ist(gk_end)}"
 
-    # --- 12x12 ASPECT MATRIX + EXACT NEXT ASPECT TIMING ---
     p_keys = list(planet_lons.keys())
     M[19][0] = "⏱️ ASPECT TIMING:"
     M[19][2] = get_next_aspect_timing(planet_lons, planet_speeds, dt_local)
@@ -698,7 +695,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
             diff = min(abs(planet_lons[pk] - planet_lons[pk2]), 360.0 - abs(planet_lons[pk] - planet_lons[pk2]))
             M[21 + idx][jdx + 1] = f"{diff:.1f}"
 
-    # --- PLANETARY SHASTRA TABLE (With SSL Column) ---
     p_headers = [
         "Body", "Longitude", "Rasi", "Tattva", "Nakshatra(P)", "NL", "SL", "SSL", "Speed",
         "Shadbala & SAV", "Baladi Avastha", "Dignity & Flags",
@@ -711,13 +707,13 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
             M[35 + ri][ci] = val
 
     guru_extras = get_guru_bot_extras(dt_local, cfg["lat"], cfg["lon"], day_lord, mo_kp, asc_kp, planet_speeds, cfg["janma_nak"], sav_points)
-    return M, guru_extras
+    kp_signature = f"Mo:{mo_kp['nl']}-{mo_kp['sl']}-{mo_kp['ssl']}|As:{asc_kp['nl']}-{asc_kp['sl']}-{asc_kp['ssl']}"
+    return M, guru_extras, kp_signature
 
 # ==========================================
 # 5. SINGLE-ALERT HINDI & OVERLAP AI BOT
 # ==========================================
 def send_telegram_alert(message_text):
-    """Sends clean, easy-to-read Hindi analysis (without raw * or # symbols) to all authorized Chat IDs."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     raw_chats = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not raw_chats:
@@ -818,7 +814,7 @@ def check_and_send_session_alerts(target_date):
         if not (open_t <= now_loc.time() <= close_t):
             continue
             
-        matrix, guru_extras = build_city_matrix(target_date, city, cfg, is_live=True)
+        matrix, guru_extras, _ = build_city_matrix(target_date, city, cfg, is_live=True)
         active_snapshots[city] = extract_city_snapshot(city, matrix, guru_extras)
         reasons = []
         
@@ -828,13 +824,11 @@ def check_and_send_session_alerts(target_date):
                 curr_h_num = str(matrix[r][17]).replace("👉", "").strip()
                 break
 
-        # 1. Single Guaranteed Alert when each new Active Hora begins
         hora_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_H{curr_h_num}"
         if hora_key not in SENT_STATE_TRACKER:
             SENT_STATE_TRACKER.add(hora_key)
             reasons.append(f"⏰ सक्रिय होरा #{curr_h_num} विश्लेषण")
 
-        # 2. Single Alert 5 mins before ~2-Hr Lagna Shift
         _, lagna_et, next_lagna_rashi, next_lagna_tattva = get_current_lagna_window(now_loc, cfg["lat"], cfg["lon"])
         lagna_mins_left = (lagna_et - now_loc).total_seconds() / 60.0
         if 0.5 <= lagna_mins_left <= 5.5:
@@ -849,7 +843,6 @@ def check_and_send_session_alerts(target_date):
     if not trigger_reasons:
         return
 
-    # 1. OVERLAP FUSION CHECK: London + New York OR Tokyo + London
     overlap_pairs = [("London_LSE", "New_York"), ("Tokyo_TSE", "London_LSE")]
     for ex1, ex2 in overlap_pairs:
         if ex1 in active_snapshots and ex2 in active_snapshots:
@@ -876,7 +869,6 @@ def check_and_send_session_alerts(target_date):
                 trigger_reasons.pop(ex1, None)
                 trigger_reasons.pop(ex2, None)
 
-    # 2. SINGLE ACTIVE SESSION ALERTS (Mumbai NSE Index/Stocks OR Standalone Tokyo / London / NY)
     for city, trig_label in trigger_reasons.items():
         asset_focus = (
             "3. 📈 NIFTY / BANKNIFTY / NSE INDEX सटीक फैसला: दिशा, संस्थागत प्रवाह (Institutional Flow), और ग्रहों का ठोस कारण (सूर्य/बुध/गुरु + Sub-Lords/SSL)।"
@@ -901,20 +893,21 @@ def check_and_send_session_alerts(target_date):
             send_telegram_alert(verdict)
 
 # ==========================================
-# 6. TODAY-ONLY EVERY-MINUTE SHEET SYNC & LIVE BOT LOOP
+# 6. ROLLING 15-DAY WINDOW & EVENT-DRIVEN COLOR ENGINE
 # ==========================================
 def safe_api_call(func, *args, **kwargs):
-    for attempt in range(4):
+    for attempt in range(3):
         try:
             return func(*args, **kwargs)
-        except gspread.exceptions.APIError as e:
-            if "429" in str(e) or "400" in str(e):
-                print(f"Google API transient pause ({e}), retrying in 30s...")
-                time.sleep(30)
-            else:
-                raise e
+        except Exception as e:
+            print(f"Google API transient pause ({e}), retrying in 15s...")
+            time.sleep(15)
+    return None
 
 def apply_professional_styling(ws):
+    """Applies borders, widths & conditional colors ONLY once per new sheet OR on NL/SL/SSL event."""
+    if sheet is None or ws is None:
+        return
     sheet_id = ws.id
     requests = [
         {
@@ -1050,35 +1043,79 @@ def apply_professional_styling(ws):
     safe_api_call(sheet.batch_update, {"requests": requests})
 
 def update_single_sheet(d, ws, is_live):
+    """Updates sheet data and returns whether any NL/SL/SSL shifted during live mode."""
+    if ws is None:
+        return False
     title = d.strftime("%Y-%m-%d")
     if ws.col_count < 55 or ws.row_count < 130:
         safe_api_call(ws.resize, rows=130, cols=55)
     batch_updates = []
+    kp_event_triggered = False
+
     for city, cfg in CITIES.items():
-        matrix, _ = build_city_matrix(d, city, cfg, is_live=is_live)
+        matrix, _, kp_sig = build_city_matrix(d, city, cfg, is_live=is_live)
+        if is_live:
+            prev_sig = LAST_KP_CHAIN_STATE.get(city)
+            if prev_sig is not None and prev_sig != kp_sig:
+                kp_event_triggered = True
+            LAST_KP_CHAIN_STATE[city] = kp_sig
+
         start_a1 = gspread.utils.rowcol_to_a1(cfg["row"], cfg["col"])
         end_a1 = gspread.utils.rowcol_to_a1(cfg["row"] + len(matrix) - 1, cfg["col"] + len(matrix[0]) - 1)
         batch_updates.append({"range": f"{start_a1}:{end_a1}", "values": matrix})
+
     safe_api_call(ws.batch_update, batch_updates, value_input_option="USER_ENTERED")
-    print(f"[{datetime.datetime.now(IST_TZ).strftime('%H:%M:%S')}] Updated LIVE Today Sheet: {title}")
+    print(f"[{datetime.datetime.now(IST_TZ).strftime('%H:%M:%S')}] Updated {'LIVE' if is_live else 'STATIC'}: {title}")
+    return kp_event_triggered
 
 def run_live_engine():
+    global sheet
     today_ist = datetime.datetime.now(IST_TZ).date()
+    valid_dates = [today_ist + datetime.timedelta(days=i) for i in range(-DAYS_BACK, DAYS_AHEAD + 1)]
+    valid_titles = {d.strftime("%Y-%m-%d") for d in valid_dates}
     today_title = today_ist.strftime("%Y-%m-%d")
-    
-    # Only fetches/creates Today's Sheet (Never recreates or scans deleted past tabs!)
-    try:
-        today_ws = safe_api_call(sheet.worksheet, today_title)
-        h35_val = safe_api_call(today_ws.acell, "H35").value
-        if h35_val != "SSL":
-            apply_professional_styling(today_ws)
-    except gspread.exceptions.WorksheetNotFound:
-        today_ws = safe_api_call(sheet.add_worksheet, title=today_title, rows=130, cols=55)
-        apply_professional_styling(today_ws)
+    today_ws = None
 
-    # Every 1-Minute Live Loop ONLY for Today's Sheet + Single-Alert Hindi Telegram Bot
+    if sheet is not None:
+        existing_sheets = {ws.title: ws for ws in safe_api_call(sheet.worksheets) or []}
+
+        # 1. Auto-delete oldest sheet beyond 15 days back (keeps rolling 31-day window)
+        for title, ws in existing_sheets.items():
+            if title not in valid_titles and len(existing_sheets) > 1:
+                safe_api_call(sheet.del_worksheet, ws)
+                print(f"Auto-deleted expired sheet: {title}")
+                time.sleep(1.5)
+
+        # 2. Create ONLY missing sheets (like new 15th day ahead) & apply colors ONCE
+        for d in valid_dates:
+            title = d.strftime("%Y-%m-%d")
+            is_today = (d == today_ist)
+            if title not in existing_sheets:
+                ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=55)
+                update_single_sheet(d, ws, is_live=is_today)
+                apply_professional_styling(ws)  # Colors applied ONLY ONCE when sheet is created
+                time.sleep(2.5)
+            else:
+                ws = existing_sheets[title]
+            if is_today:
+                today_ws = ws
+
+    # 3. Every 1-Minute Live Loop ONLY for Today's Sheet (Colors update ONLY on NL/SL/SSL event!)
     for minute_tick in range(LIVE_LOOP_MINUTES):
-        update_single_sheet(today_ist, today_ws, is_live=True)
+        if sheet is None:
+            sheet = connect_sheet()
+            if sheet is not None and today_ws is None:
+                try:
+                    today_ws = safe_api_call(sheet.worksheet, today_title)
+                except Exception:
+                    today_ws = safe_api_call(sheet.add_worksheet, title=today_title, rows=130, cols=55)
+                    apply_professional_styling(today_ws)
+
+        kp_shifted = update_single_sheet(today_ist, today_ws, is_live=True)
+        if kp_shifted and today_ws is not None:
+            print("NL/SL/SSL shift detected! Refreshing colors once for event...")
+            apply_professional_styling(today_ws)
+
         check_and_send_session_alerts(today_ist)
         if minute_tick < LIVE_LOOP_MINUTES - 1:
             time.sleep(60)
