@@ -701,7 +701,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
 # ==========================================
 def send_telegram_alert(message_text):
     """Sends deep astro-trading analysis to all authorized Chat IDs (comma-separated in Secrets)."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     raw_chats = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not raw_chats:
         print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
@@ -751,19 +751,25 @@ PLANETARY TRANSIT TABLE:
 """
 
 def call_gemini_analyst(prompt_text):
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
-        return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    body = json.dumps({"contents": [{"parts": [{"text": prompt_text}]}]}).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        print("Gemini error:", e)
-        return None
+        return "⚠️ GEMINI_API_KEY Secret खाली है! GitHub Secrets में चाबी डालें।"
+    
+    models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    last_err = ""
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        body = json.dumps({"contents": [{"parts": [{"text": prompt_text}]}]}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=35) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            last_err = f"{model_name}: {str(e)}"
+            continue
+    print("Gemini all models failed:", last_err)
+    return f"⚠️ Gemini API Error ({last_err[:120]}): कृपया Google AI Studio से नई API Key बनाकर GEMINI_API_KEY Secret अपडेट करें।"
 
 def check_and_send_session_alerts(target_date):
     """Bulletproof Session-Only Alert Engine: Guarantees 1 alert per active Hora & Lagna shift without missing due to cron gaps."""
@@ -847,8 +853,6 @@ def check_and_send_session_alerts(target_date):
                 verdict = call_gemini_analyst(prompt)
                 if verdict:
                     send_telegram_alert(verdict)
-                else:
-                    send_telegram_alert(f"⚠️ Astro Engine Alert ({trig_combined}): Gemini AI key check needed!")
                 trigger_reasons.pop(ex1, None)
                 trigger_reasons.pop(ex2, None)
 
@@ -875,8 +879,6 @@ def check_and_send_session_alerts(target_date):
         verdict = call_gemini_analyst(prompt)
         if verdict:
             send_telegram_alert(verdict)
-        else:
-            send_telegram_alert(f"⚠️ Astro Engine Alert ({city} - {trig_label}): Gemini AI key check needed!")
 
 # ==========================================
 # 6. PROFESSIONAL STYLING, BORDERS & QUOTA-SAFE LOOP
