@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import datetime
@@ -25,7 +26,7 @@ if "/d/" in raw_id:
     raw_id = raw_id.split("/d/")[1].split("/")[0]
 sheet = client.open_by_key(raw_id)
 
-# Exchanges Configuration (25-column wide quadrants)
+# Exchanges Configuration (25-column wide quadrants + Exchange Janma Nakshatra)
 CITIES = {
     "Mumbai_NSE": {"lat": 19.0760, "lon": 72.8777, "tz": "Asia/Kolkata",     "row": 1,  "col": 1,  "janma_nak": 12},
     "Tokyo_TSE":  {"lat": 35.6762, "lon": 139.6503,"tz": "Asia/Tokyo",       "row": 1,  "col": 27, "janma_nak": 3},
@@ -33,7 +34,7 @@ CITIES = {
     "New_York":   {"lat": 40.7128, "lon": -74.0060,"tz": "America/New_York", "row": 64, "col": 27, "janma_nak": 21}
 }
 
-# Active Session Windows (Local Exchange Time - Leading zeros removed for Python 3)
+# Active Session Windows (Local Exchange Time)
 SESSION_WINDOWS_LOCAL = {
     "Mumbai_NSE": (datetime.time(9, 10), datetime.time(15, 35)),
     "Tokyo_TSE":  (datetime.time(8, 55), datetime.time(17, 30)),
@@ -424,8 +425,8 @@ def get_karana_and_bhadra(tithi_deg, moon_rashi):
             bhadra_vaas = "🟡 Patala Bhadra"
     return k_name, bhadra_vaas
 
-def get_guru_bot_extras(dt_local, lat, lon, day_lord, mo_kp, asc_kp, planet_speeds):
-    """Guru-level extra calculations for Telegram Bot: KP Ruling Planets, 3rd-level SSL & Out-of-Bounds Declination."""
+def get_guru_bot_extras(dt_local, lat, lon, day_lord, mo_kp, asc_kp, planet_speeds, janma_nak_idx, sav_points):
+    """Guru-level extra calculations: KP Ruling Planets, 3rd-level SSL, OOB Declination, & Local Lagna SAV."""
     u = dt_local.astimezone(pytz.UTC)
     jd = swe.julday(u.year, u.month, u.day, u.hour + u.minute/60.0 + u.second/3600.0)
     
@@ -448,7 +449,12 @@ def get_guru_bot_extras(dt_local, lat, lon, day_lord, mo_kp, asc_kp, planet_spee
             oob_list.append(f"{p_name}(Decl:{decl:.2f}° OOB!)")
     oob_str = ", ".join(oob_list) if oob_list else "None (All planets within 23.45°)"
 
+    lagna_sav = sav_points[asc_kp["rashi_idx"]]
+    tenth_rashi = RASHIS[(asc_kp["rashi_idx"] + 9) % 12]
+    tenth_sav = sav_points[(asc_kp["rashi_idx"] + 9) % 12]
+
     return (
+        f"LOCAL HORIZON & EXCHANGE DNA: Exchange Janma Nakshatra = {NAKSHATRAS[janma_nak_idx]} | Local Lagna = {asc_kp['rashi']} (SAV:{lagna_sav}) | 10th House (Karma/Volume) = {tenth_rashi} (SAV:{tenth_sav})\n"
         f"KP RULING PLANETS: {rp_summary} | {rp_warning}\n"
         f"3RD-LEVEL KP SSL: Moon SSL = {mo_kp['ssl']} | Lagna SSL = {asc_kp['ssl']}\n"
         f"OUT-OF-BOUNDS (OOB) COMMODITY SPIKE CHECK: {oob_str}"
@@ -693,14 +699,14 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
         for ci, val in enumerate(pr):
             M[35 + ri][ci] = val
 
-    guru_extras = get_guru_bot_extras(dt_local, cfg["lat"], cfg["lon"], day_lord, mo_kp, asc_kp, planet_speeds)
+    guru_extras = get_guru_bot_extras(dt_local, cfg["lat"], cfg["lon"], day_lord, mo_kp, asc_kp, planet_speeds, cfg["janma_nak"], sav_points)
     return M, guru_extras
 
 # ==========================================
-# 5. BULLETPROOF SESSION-ONLY & OVERLAP AI BOT
+# 5. BULLETPROOF HINDI & OVERLAP AI BOT
 # ==========================================
 def send_telegram_alert(message_text):
-    """Sends deep astro-trading analysis to all authorized Chat IDs (comma-separated in Secrets)."""
+    """Sends clean, easy-to-read Hindi analysis (without raw * or # symbols) to all authorized Chat IDs."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     raw_chats = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not raw_chats:
@@ -709,7 +715,9 @@ def send_telegram_alert(message_text):
     chat_ids = [cid.strip() for cid in raw_chats.split(",") if cid.strip()]
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     
-    chunks = [message_text[i:i+3900] for i in range(0, len(message_text), 3900)]
+    # Remove raw markdown asterisks and hashtags for clean newspaper-style reading
+    clean_text = re.sub(r'[*#]', '', message_text)
+    chunks = [clean_text[i:i+3900] for i in range(0, len(clean_text), 3900)]
     for cid in chat_ids:
         for chunk in chunks:
             payload = json.dumps({"chat_id": cid, "text": chunk}).encode("utf-8")
@@ -755,7 +763,6 @@ def call_gemini_analyst(prompt_text):
     if not api_key:
         return "⚠️ GEMINI_API_KEY Secret खाली है! GitHub Secrets में चाबी डालें।"
     
-    # 1. Auto-discover exact active models supported by your API Key
     models_to_try = []
     try:
         list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
@@ -769,7 +776,6 @@ def call_gemini_analyst(prompt_text):
     except Exception as e:
         print("Model list fetch error:", e)
 
-    # Fallback candidates if list fetch fails
     for fallback in ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash"]:
         if fallback not in models_to_try:
             models_to_try.append(fallback)
@@ -790,7 +796,7 @@ def call_gemini_analyst(prompt_text):
     return f"⚠️ Gemini API Error ({last_err[:140]}): कृपया Google AI Studio से नई API Key बनाकर GEMINI_API_KEY Secret अपडेट करें।"
 
 def check_and_send_session_alerts(target_date):
-    """Bulletproof Session-Only Alert Engine: Guarantees 1 alert per active Hora & Lagna shift without missing due to cron gaps."""
+    """Bulletproof Session-Only Alert Engine in pure Hindi with Cross-Exchange Lagna/SAV Comparison."""
     active_snapshots = {}
     trigger_reasons = {}
 
@@ -823,14 +829,14 @@ def check_and_send_session_alerts(target_date):
         hora_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_H{curr_h_num}"
         if hora_key not in SENT_STATE_TRACKER:
             SENT_STATE_TRACKER.add(hora_key)
-            reasons.append(f"⏰ ACTIVE HORA #{curr_h_num} EXECUTION BRIEF")
+            reasons.append(f"⏰ सक्रिय होरा #{curr_h_num} विश्लेषण")
 
         # 2. Pre-Alert 5 mins before Next Hora starts
         if 0.5 <= mins_left_hora <= 5.5:
             pre_hora_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_PRE_H{curr_h_num}"
             if pre_hora_key not in SENT_STATE_TRACKER:
                 SENT_STATE_TRACKER.add(pre_hora_key)
-                reasons.append("🔔 UPCOMING HORA SHIFT (in ~5m)")
+                reasons.append("🔔 अगली होरा बदलाव (5 मिनट में)")
 
         # 3. Guaranteed Alert for ~2-Hr Lagna Shift
         _, lagna_et, next_lagna_rashi, next_lagna_tattva = get_current_lagna_window(now_loc, cfg["lat"], cfg["lon"])
@@ -839,7 +845,7 @@ def check_and_send_session_alerts(target_date):
             lagna_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_LAGNA_{next_lagna_rashi}"
             if lagna_key not in SENT_STATE_TRACKER:
                 SENT_STATE_TRACKER.add(lagna_key)
-                reasons.append(f"🧭 LAGNA SHIFT (in ~5m -> {next_lagna_rashi} [{next_lagna_tattva}])")
+                reasons.append(f"🧭 लग्न बदलाव (5 मिनट में -> {next_lagna_rashi} [{next_lagna_tattva}])")
 
         if reasons:
             trigger_reasons[city] = " + ".join(reasons)
@@ -852,21 +858,21 @@ def check_and_send_session_alerts(target_date):
     for ex1, ex2 in overlap_pairs:
         if ex1 in active_snapshots and ex2 in active_snapshots:
             if ex1 in trigger_reasons or ex2 in trigger_reasons:
-                trig_combined = f"{ex1}: {trigger_reasons.get(ex1, 'Active')} | {ex2}: {trigger_reasons.get(ex2, 'Active')}"
+                trig_combined = f"{ex1}: {trigger_reasons.get(ex1, 'सक्रिय')} | {ex2}: {trigger_reasons.get(ex2, 'सक्रिय')}"
                 prompt = f"""
-                You are a Grandmaster KP & Vedic Financial Astrologer writing a DEEP, STRICT, AND CLEAR institutional trading briefing in Hinglish (Hindi + English trading terms).
-                TWO GLOBAL EXCHANGES ARE OVERLAPPING RIGHT NOW: {ex1} AND {ex2}!
-                TRIGGER EVENT: {trig_combined}
+                आप एक सर्वोच्च KP और वैदिक फाइनेंशियल एस्ट्रोलॉजर (ज्योतिषी) हैं। नीचे दिए गए लाइव डेटा का गहरा, सख्त और बिल्कुल स्पष्ट विश्लेषण शुद्ध और सरल हिंदी (देवनागरी लिपि) में लिखें। केवल जरूरी ट्रेडिंग शब्द जैसे Support, Resistance, FVG, Liquidity Sweep, Breakout, Fakeout अंग्रेजी में रखें। किसी भी शब्द में * या # का उपयोग न करें।
+                दो ग्लोबल एक्सचेंज अभी एक साथ ओवरलैप हो रहे हैं: {ex1} और {ex2}!
+                ट्रिगर इवेंट: {trig_combined}
 
                 {active_snapshots[ex1]}
                 {active_snapshots[ex2]}
 
-                Provide a thorough, crystal-clear, deep explanation with EXACT IST & Local timestamps covering:
-                1. 🔥 OVERLAP & TIMING FUSION ({ex1} + {ex2} in Local & IST): Minute-by-minute roadmap of how both exchanges' Hora Lords, Dinmaan, and ~2-Hr Lagna Tattvas interact.
-                2. 🧬 3-LAYER KP CHAIN & RULING PLANETS: Deep breakdown of Hora Lord -> NL -> SL -> 3rd-level SSL, Shadbala/SAV strength, Baladi Avastha, and KP Ruling Planets (Vakri/Sandhi check).
-                3. 🥇 GOLD (XAUUSD) DEEP VERDICT: Exact directional bias (Trend vs Trap/Reversal), liquidity sweep expectation, and planetary reasoning (Sun/Jupiter + Sub-Lords + OOB check).
-                4. 🥈 SILVER (XAGUSD) DEEP VERDICT: Expected volatility, spike risk, and exact planetary reasoning (Moon/Venus + Sub-Lords).
-                5. 🛑 STRICT TRAP & SAFETY FILTER: Exact IST & Local times for Hora Sandhi Freeze (first/last 5m), Rahu/Gulika Kaal, SBC Vedha, and exact Aspect Hit times.
+                सटीक IST और Local समय के साथ इन 5 बिंदुओं में पूरा विवरण दें:
+                1. 🔥 ओवरलैप और सटीक समय रोडमैप ({ex1} + {ex2} — Local और IST): बताएं कि पहले एक्सचेंज के स्थानीय लग्न/SAV/जन्म नक्षत्र में रुका हुआ वॉल्यूम दूसरे एक्सचेंज के लग्न और 10वें भाव के खुलते ही कैसे कंसोलिडेट होकर बड़ा विस्फोटक मूव बनाएगा।
+                2. 🧬 3-लेयर KP चेन और रूलिंग प्लैनेट्स: Hora Lord -> NL -> SL -> 3rd-level SSL, षड्बल/SAV ताकत, बालादि अवस्था, और KP Ruling Planets (वक्री/संधि जांच) का गहरा विश्लेषण।
+                3. 🥇 GOLD (XAUUSD) सटीक फैसला: दिशा (Trend या Trap/Reversal), लिक्विडिटी स्वीप की संभावना, और ग्रहों का ठोस कारण (सूर्य/गुरु + Sub-Lords + OOB जांच)।
+                4. 🥈 SILVER (XAGUSD) सटीक फैसला: उतार-चढ़ाव (Volatility), अचानक स्पाइक का खतरा, और ग्रहों का ठोस कारण (चंद्रमा/शुक्र + Sub-Lords)।
+                5. 🛑 सख्त ट्रैप और सुरक्षा फिल्टर: Hora Sandhi Freeze (शुरुआती और आखिरी 5 मिनट), राहु/गुलिक काल, SBC वेध, और अगले सटीक Aspect Hit का मिनट-दर-मिनट समय।
                 """
                 verdict = call_gemini_analyst(prompt)
                 if verdict:
@@ -877,22 +883,22 @@ def check_and_send_session_alerts(target_date):
     # 2. SINGLE ACTIVE SESSION ALERTS (Mumbai NSE Index/Stocks OR Standalone Tokyo / London / NY)
     for city, trig_label in trigger_reasons.items():
         asset_focus = (
-            "3. 📈 NIFTY / BANKNIFTY / NSE INDEX DEEP VERDICT: Exact directional bias, institutional flow, and planetary reasoning (Sun/Mercury/Jupiter + Sub-Lords)."
+            "3. 📈 NIFTY / BANKNIFTY / NSE INDEX सटीक फैसला: दिशा, संस्थागत प्रवाह (Institutional Flow), और ग्रहों का ठोस कारण (सूर्य/बुध/गुरु + Sub-Lords)।"
             if city == "Mumbai_NSE" else
-            "3. 🥇 GOLD (XAUUSD) & 🥈 SILVER (XAGUSD) SEPARATE DEEP VERDICTS: Give separate, detailed move predictions and exact astrological reasons for BOTH Gold (Sun/Ju) and Silver (Moon/Ve)."
+            "3. 🥇 GOLD (XAUUSD) और 🥈 SILVER (XAGUSD) का अलग-अलग सटीक फैसला: दोनों की संभावित चाल और सटीक ज्योतिषीय कारण विस्तार से बताएं।"
         )
         prompt = f"""
-        You are a Grandmaster KP & Vedic Financial Astrologer writing a DEEP, STRICT, AND CLEAR institutional trading briefing in Hinglish (Hindi + English trading terms).
-        EXCHANGE: {city}
-        TRIGGER EVENT: {trig_label}
+        आप एक सर्वोच्च KP और वैदिक फाइनेंशियल एस्ट्रोलॉजर (ज्योतिषी) हैं। नीचे दिए गए लाइव डेटा का गहरा, सख्त और बिल्कुल स्पष्ट विश्लेषण शुद्ध और सरल हिंदी (देवनागरी लिपि) में लिखें। केवल जरूरी ट्रेडिंग शब्द जैसे Support, Resistance, FVG, Liquidity Sweep, Breakout, Fakeout अंग्रेजी में रखें। किसी भी शब्द में * या # का उपयोग न करें।
+        एक्सचेंज: {city}
+        ट्रिगर इवेंट: {trig_label}
 
         {active_snapshots[city]}
 
-        Provide a thorough, crystal-clear, deep explanation with EXACT IST & Local timestamps covering:
-        1. ⏰ EXACT TIMING, DINMAAN & LAGNA SHIFT (Local & IST): Minute-by-minute roadmap of the current & upcoming Hora + ~2-Hr Lagna Tattva impact on market speed.
-        2. 🧬 3-LAYER KP CHAIN & RULING PLANETS: Deep breakdown of Hora Lord -> NL -> SL -> 3rd-level SSL, Shadbala/SAV, Baladi Avastha, Dignity/Flags, and KP Ruling Planets.
+        सटीक IST और Local समय के साथ इन 4 बिंदुओं में पूरा विवरण दें:
+        1. ⏰ सटीक समय, स्थानीय लग्न और एक्सचेंज जन्म नक्षत्र प्रभाव (Local और IST): वर्तमान व आने वाली होरा, स्थानीय लग्न SAV और 10वें भाव के आधार पर बताएं कि मार्केट अभी कंसोलिडेट (Range) करेगा या बड़ा एकतरफा मूव देगा।
+        2. 🧬 3-लेयर KP चेन और रूलिंग प्लैनेट्स: Hora Lord -> NL -> SL -> 3rd-level SSL, षड्बल/SAV, बालादि अवस्था, उच्च/नीच/वक्री/संधि और KP Ruling Planets का गहरा विश्लेषण।
         {asset_focus}
-        4. ⚠️ STRICT EXECUTION & TRAP CHECKLIST: Exact IST & Local times for Hora Sandhi Freeze (first/last 5m), Rahu/Gulika Kaal, SBC Vedha, and exact Aspect Hit times.
+        4. ⚠️ सख्त ट्रेडिंग और ट्रैप चेकलिस्ट: Hora Sandhi Freeze (शुरुआती और आखिरी 5 मिनट), राहु/गुलिक काल, SBC वेध, और अगले सटीक Aspect Hit का समय।
         """
         verdict = call_gemini_analyst(prompt)
         if verdict:
@@ -1094,7 +1100,7 @@ def run_live_engine():
 
     apply_professional_styling(today_ws)
 
-    # 3. Every 1-Minute Live Loop for Today's Sheet + Session-Only Deep AI Telegram Bot
+    # 3. Every 1-Minute Live Loop for Today's Sheet + Session-Only Deep Hindi AI Telegram Bot
     for minute_tick in range(LIVE_LOOP_MINUTES):
         update_single_sheet(today_ist, today_ws, is_live=True)
         check_and_send_session_alerts(today_ist)
