@@ -12,8 +12,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 # 1. CONFIGURATION & QUOTA-SAFE CONNECTION
 # ==========================================
-DAYS_BACK = 30
-DAYS_AHEAD = 18
 LIVE_LOOP_MINUTES = 55  # Runs every 60s for 55 mins continuously per cycle
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -24,7 +22,17 @@ client = gspread.authorize(creds)
 raw_id = os.environ["SHEET_ID"].strip()
 if "/d/" in raw_id:
     raw_id = raw_id.split("/d/")[1].split("/")[0]
-sheet = client.open_by_key(raw_id)
+
+sheet = None
+for attempt in range(5):
+    try:
+        sheet = client.open_by_key(raw_id)
+        break
+    except Exception as e:
+        print(f"Attempt {attempt+1}/5: Google Sheet open glitch, retrying in 15s... ({e})")
+        time.sleep(15)
+if sheet is None:
+    raise RuntimeError("Could not open Google Sheet after 5 attempts. Check SHEET_ID secret.")
 
 # Exchanges Configuration (25-column wide quadrants + Exchange Janma Nakshatra)
 CITIES = {
@@ -563,7 +571,6 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
 
     sav_points = compute_sav_points(rashi_signs_dict)
     
-    # Planetary Shastra Table with dedicated SSL column (15 columns: A to O)
     planet_rows = [[
         "As", deg_to_dms(asc_deg), asc_kp["rashi"], asc_kp["tattva"], asc_kp["nak"],
         asc_kp["nl"], asc_kp["sl"], asc_kp["ssl"], "0.00", f"SAV:{sav_points[asc_r_idx]}", "Lagna (~2h)", "Active Horizon",
@@ -796,7 +803,7 @@ def call_gemini_analyst(prompt_text):
     return f"⚠️ Gemini API Error ({last_err[:140]}): कृपया Google AI Studio से नई API Key बनाकर GEMINI_API_KEY Secret अपडेट करें।"
 
 def check_and_send_session_alerts(target_date):
-    """Sends ONLY 1 clean Hindi alert per new Hora start & ~2-Hr Lagna shift (no duplicate pre-alerts)."""
+    """Sends ONLY 1 clean Hindi alert per new Hora start & ~2-Hr Lagna shift."""
     active_snapshots = {}
     trigger_reasons = {}
 
@@ -891,16 +898,16 @@ def check_and_send_session_alerts(target_date):
             send_telegram_alert(verdict)
 
 # ==========================================
-# 6. PROFESSIONAL STYLING, BORDERS & QUOTA-SAFE LOOP
+# 6. TODAY-ONLY EVERY-MINUTE SHEET SYNC & LIVE BOT LOOP
 # ==========================================
 def safe_api_call(func, *args, **kwargs):
     for attempt in range(4):
         try:
             return func(*args, **kwargs)
         except gspread.exceptions.APIError as e:
-            if "429" in str(e):
-                print("Quota limit hit (429), pausing 65s to reset...")
-                time.sleep(65)
+            if "429" in str(e) or "400" in str(e):
+                print(f"Google API transient pause ({e}), retrying in 30s...")
+                time.sleep(30)
             else:
                 raise e
 
@@ -1050,43 +1057,23 @@ def update_single_sheet(d, ws, is_live):
         end_a1 = gspread.utils.rowcol_to_a1(cfg["row"] + len(matrix) - 1, cfg["col"] + len(matrix[0]) - 1)
         batch_updates.append({"range": f"{start_a1}:{end_a1}", "values": matrix})
     safe_api_call(ws.batch_update, batch_updates, value_input_option="USER_ENTERED")
-    print(f"[{datetime.datetime.now(IST_TZ).strftime('%H:%M:%S')}] Updated {'LIVE' if is_live else 'STATIC'}: {title}")
+    print(f"[{datetime.datetime.now(IST_TZ).strftime('%H:%M:%S')}] Updated LIVE Today Sheet: {title}")
 
 def run_live_engine():
     today_ist = datetime.datetime.now(IST_TZ).date()
-    valid_dates = [today_ist + datetime.timedelta(days=i) for i in range(-DAYS_BACK, DAYS_AHEAD + 1)]
-    valid_titles = {d.strftime("%Y-%m-%d") for d in valid_dates}
-    existing_sheets = {ws.title: ws for ws in safe_api_call(sheet.worksheets)}
+    today_title = today_ist.strftime("%Y-%m-%d")
     
-    # 1. Cleanup expired sheets
-    for title, ws in existing_sheets.items():
-        if title not in valid_titles and len(existing_sheets) > 1:
-            safe_api_call(sheet.del_worksheet, ws)
-            time.sleep(1.5)
-            
-    # 2. Create missing OR upgrade ANY sheet lacking the new IST + SSL layout
-    today_ws = None
-    for d in valid_dates:
-        title = d.strftime("%Y-%m-%d")
-        is_today = (d == today_ist)
-        if title not in existing_sheets:
-            ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=55)
-            update_single_sheet(d, ws, is_live=is_today)
-            apply_professional_styling(ws)
-            time.sleep(3.5)
-        else:
-            ws = existing_sheets[title]
-            h35_val = safe_api_call(ws.acell, "H35").value
-            if h35_val != "SSL":
-                update_single_sheet(d, ws, is_live=is_today)
-                apply_professional_styling(ws)
-                time.sleep(3.5)
-        if is_today:
-            today_ws = ws
+    # Only fetches/creates Today's Sheet (no bulk 49-sheet scan!)
+    try:
+        today_ws = safe_api_call(sheet.worksheet, today_title)
+        h35_val = safe_api_call(today_ws.acell, "H35").value
+        if h35_val != "SSL":
+            apply_professional_styling(today_ws)
+    except gspread.exceptions.WorksheetNotFound:
+        today_ws = safe_api_call(sheet.add_worksheet, title=today_title, rows=130, cols=55)
+        apply_professional_styling(today_ws)
 
-    apply_professional_styling(today_ws)
-
-    # 3. Every 1-Minute Live Loop for Today's Sheet + Single-Alert Hindi AI Telegram Bot
+    # Every 1-Minute Live Loop ONLY for Today's Sheet + Single-Alert Hindi Telegram Bot
     for minute_tick in range(LIVE_LOOP_MINUTES):
         update_single_sheet(today_ist, today_ws, is_live=True)
         check_and_send_session_alerts(today_ist)
