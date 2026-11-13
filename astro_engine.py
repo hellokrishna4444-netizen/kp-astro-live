@@ -39,7 +39,7 @@ SESSION_WINDOWS_LOCAL = {
     "Mumbai_NSE": (datetime.time(9, 10), datetime.time(15, 35)),
     "Tokyo_TSE":  (datetime.time(8, 55), datetime.time(17, 30)),
     "London_LSE": (datetime.time(7, 55), datetime.time(16, 35)),
-    "New_York":   (datetime.time(9, 25), datetime.time(16, 05))
+    "New_York":   (datetime.time(9, 25), datetime.time(16, 5))
 }
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
