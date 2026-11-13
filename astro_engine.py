@@ -33,8 +33,7 @@ CITIES = {
     "New_York":   {"lat": 40.7128, "lon": -74.0060,"tz": "America/New_York", "row": 64, "col": 27, "janma_nak": 21}
 }
 
-# Active Session Windows (Local Exchange Time)
-# Tokyo extended to 17:30 Tokyo (02:00 PM IST) so Tokyo Close + London Open overlap is also captured!
+# Active Session Windows (Local Exchange Time - Leading zeros removed for Python 3)
 SESSION_WINDOWS_LOCAL = {
     "Mumbai_NSE": (datetime.time(9, 10), datetime.time(15, 35)),
     "Tokyo_TSE":  (datetime.time(8, 55), datetime.time(17, 30)),
@@ -43,7 +42,7 @@ SESSION_WINDOWS_LOCAL = {
 }
 
 IST_TZ = pytz.timezone("Asia/Kolkata")
-SENT_ALERTS_CACHE = set()
+SENT_STATE_TRACKER = set()
 
 # ==========================================
 # 2. SHASTRA TABLES & CONSTANTS
@@ -159,7 +158,8 @@ def get_varesh_summary(day_lord):
 
 def get_baladi_avastha(rashi_num, deg_in_rashi):
     idx = int(deg_in_rashi // 6.0)
-    if rashi_num % 2 == 0: idx = 4 - idx
+    if rashi_num % 2 == 0:
+        idx = 4 - idx
     return ["Baal(25%)", "Kumar(50%)", "Yuva(100%)", "Vriddha(20%)", "Mrit(0%)"][max(0, min(4, idx))]
 
 def compute_shadbala_rupas(p_name, lon, speed, h_d1, is_day, su_lon, mo_lon):
@@ -173,7 +173,8 @@ def compute_shadbala_rupas(p_name, lon, speed, h_d1, is_day, su_lon, mo_lon):
     
     dig_targets = {"Me": 1, "Ju": 1, "Mo": 4, "Ve": 4, "Sa": 7, "Su": 10, "Ma": 10}
     diff_h = abs(h_d1 - dig_targets[p_name])
-    if diff_h > 6: diff_h = 12 - diff_h
+    if diff_h > 6:
+        diff_h = 12 - diff_h
     dig_bala = (6 - diff_h) * 10.0
     
     day_strong = p_name in ["Su", "Ju", "Ve"]
@@ -236,7 +237,6 @@ def get_kp_full(deg):
             break
         curr += span
 
-    # 3rd Level Sub-Sub-Lord (SSL) for ultra-precise intraday scalp timing
     rem_sl = rem_nak - sl_start
     curr_ssl, ssl = 0.0, sl
     for j in range(9):
@@ -311,9 +311,11 @@ def get_next_aspect_timing(planet_lons, planet_speeds, dt_local):
     best_desc = ""
     
     for p_name, p_lon in planet_lons.items():
-        if p_name == "Mo": continue
+        if p_name == "Mo":
+            continue
         rel_spd = mo_spd - planet_speeds.get(p_name, 0.0)
-        if rel_spd <= 0.5: continue
+        if rel_spd <= 0.5:
+            continue
         curr_diff = (mo_lon - p_lon) % 360.0
         for t in targets:
             for ang in ([t] if t in [0, 180] else [t, 360 - t]):
@@ -368,7 +370,8 @@ def get_current_lagna_window(dt_local, lat, lon):
     return st, et, next_rashi, TATTVA_MAP[next_rashi]
 
 def to_sbc_index(lon):
-    if 276.6667 <= lon <= 280.8889: return 21
+    if 276.6667 <= lon <= 280.8889:
+        return 21
     nak_27 = int((lon % 360.0) // (360.0 / 27.0))
     return nak_27 if nak_27 < 21 else nak_27 + 1
 
@@ -379,7 +382,8 @@ def evaluate_sarvatobhadra_vedha(planet_lons, planet_speeds, exchange_janma_nak_
     mal_hits, ben_hits = [], []
     
     for p_name, lon in planet_lons.items():
-        if p_name in ["Ur", "Ne", "Pl", "Mo"]: continue
+        if p_name in ["Ur", "Ne", "Pl", "Mo"]:
+            continue
         p_sbc = to_sbc_index(lon)
         spd = planet_speeds.get(p_name, 1.0)
         for off in [0, 6, 8, 14, 20, 22]:
@@ -388,8 +392,10 @@ def evaluate_sarvatobhadra_vedha(planet_lons, planet_speeds, exchange_janma_nak_
                 ht = "Exch" if target == exch_sbc else "Moon"
                 vt = "Front" if off in [0, 14] else ("Right" if off in [6, 8] else "Left")
                 lbl = f"{p_name}{'(R)' if spd < 0 else ''}->{ht}[{vt}]"
-                if p_name in malefics: mal_hits.append(lbl)
-                else: ben_hits.append(lbl)
+                if p_name in malefics:
+                    mal_hits.append(lbl)
+                else:
+                    ben_hits.append(lbl)
                 
     if len(mal_hits) >= 2 and not ben_hits:
         return f"🔴 PAAP VEDHA ({', '.join(mal_hits[:2])}): Sudden Selloff / Trap Risk!"
@@ -401,15 +407,21 @@ def evaluate_sarvatobhadra_vedha(planet_lons, planet_speeds, exchange_janma_nak_
 
 def get_karana_and_bhadra(tithi_deg, moon_rashi):
     k_idx = int(tithi_deg // 6.0)
-    if k_idx == 0: k_name = "Kintughna"
-    elif k_idx >= 57: k_name = ["Shakuni", "Chatushpada", "Naga"][k_idx - 57]
-    else: k_name = CHARA_KARANAS[(k_idx - 1) % 7]
+    if k_idx == 0:
+        k_name = "Kintughna"
+    elif k_idx >= 57:
+        k_name = ["Shakuni", "Chatushpada", "Naga"][k_idx - 57]
+    else:
+        k_name = CHARA_KARANAS[(k_idx - 1) % 7]
     
     bhadra_vaas = "Bhadra-Free"
     if "Vishti" in k_name:
-        if moon_rashi in ["Cn", "Le", "Aq", "Pi"]: bhadra_vaas = "🔴 MRITYU LOK BHADRA"
-        elif moon_rashi in ["Ar", "Ta", "Ge", "Sc"]: bhadra_vaas = "🟢 Swarga Bhadra"
-        else: bhadra_vaas = "🟡 Patala Bhadra"
+        if moon_rashi in ["Cn", "Le", "Aq", "Pi"]:
+            bhadra_vaas = "🔴 MRITYU LOK BHADRA"
+        elif moon_rashi in ["Ar", "Ta", "Ge", "Sc"]:
+            bhadra_vaas = "🟢 Swarga Bhadra"
+        else:
+            bhadra_vaas = "🟡 Patala Bhadra"
     return k_name, bhadra_vaas
 
 def get_guru_bot_extras(dt_local, lat, lon, day_lord, mo_kp, asc_kp, planet_speeds):
@@ -417,7 +429,6 @@ def get_guru_bot_extras(dt_local, lat, lon, day_lord, mo_kp, asc_kp, planet_spee
     u = dt_local.astimezone(pytz.UTC)
     jd = swe.julday(u.year, u.month, u.day, u.hour + u.minute/60.0 + u.second/3600.0)
     
-    # 1. KP Ruling Planets (5 Pillars)
     rps = [
         ("DayLord", day_lord),
         ("MoonSignLord", mo_kp["rashi_lord"]),
@@ -429,7 +440,6 @@ def get_guru_bot_extras(dt_local, lat, lon, day_lord, mo_kp, asc_kp, planet_spee
     rp_summary = ", ".join([f"{r}={p}" for r, p in rps])
     rp_warning = f"⚠️ VAKRI RPs ({len(retro_rps)}/5): {', '.join(retro_rps)} -> High Fakeout/Retest Risk!" if len(retro_rps) >= 2 else "✅ RPs Direct/Stable"
 
-    # 2. Out-of-Bounds (OOB) Declination check (> 23.45 deg -> Commodity Spike Trigger)
     oob_list = []
     for p_name, p_id in [("Mo", swe.MOON), ("Ma", swe.MARS), ("Me", swe.MERCURY), ("Ju", swe.JUPITER), ("Ve", swe.VENUS), ("Sa", swe.SATURN)]:
         res_eq, _ = swe.calc_ut(jd, p_id, swe.FLG_EQUATORIAL)
@@ -558,11 +568,16 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     for p_name, lon, speed, kp in raw_bodies:
         is_retro = (speed < 0) or (p_name in ["Ra", "Ke"])
         flags = []
-        if EXALT_SIGNS.get(p_name) == kp["rashi"]: flags.append("UCHHA")
-        elif DEBIL_SIGNS.get(p_name) == kp["rashi"]: flags.append("NEECH")
-        elif kp["rashi_lord"] == p_name: flags.append("Swakshetra")
-        if is_retro and p_name not in ["Ra", "Ke"]: flags.append("VAKRI(R)")
-        if kp["is_sandhi"]: flags.append("SANDHI")
+        if EXALT_SIGNS.get(p_name) == kp["rashi"]:
+            flags.append("UCHHA")
+        elif DEBIL_SIGNS.get(p_name) == kp["rashi"]:
+            flags.append("NEECH")
+        elif kp["rashi_lord"] == p_name:
+            flags.append("Swakshetra")
+        if is_retro and p_name not in ["Ra", "Ke"]:
+            flags.append("VAKRI(R)")
+        if kp["is_sandhi"]:
+            flags.append("SANDHI")
         if p_name in COMBUST_ORBS:
             if min(abs(lon - su_lon), 360.0 - abs(lon - su_lon)) <= COMBUST_ORBS[p_name]:
                 flags.append("ASTA")
@@ -632,12 +647,18 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     is_panchak = "YES (5x Swing)" if mo_kp["rashi"] in ["Aq", "Pi"] else "No"
 
     dangers = []
-    if in_sandhi_kaal: dangers.append("⏸️ HORA SANDHI FREEZE (First/Last 5m)")
-    if in_rahu: dangers.append("RAHU KAAL")
-    if in_gulika: dangers.append("GULIKA KAAL")
-    if "MRITYU" in bhadra_vaas: dangers.append("MRITYU BHADRA")
-    if "Ghor Ashubha" in yog_nat: dangers.append(f"YOGA:{yog_name}")
-    if "Ghor Ashubha" in tara_nat: dangers.append(f"TARA:{tara_name}")
+    if in_sandhi_kaal:
+        dangers.append("⏸️ HORA SANDHI FREEZE (First/Last 5m)")
+    if in_rahu:
+        dangers.append("RAHU KAAL")
+    if in_gulika:
+        dangers.append("GULIKA KAAL")
+    if "MRITYU" in bhadra_vaas:
+        dangers.append("MRITYU BHADRA")
+    if "Ghor Ashubha" in yog_nat:
+        dangers.append(f"YOGA:{yog_name}")
+    if "Ghor Ashubha" in tara_nat:
+        dangers.append(f"TARA:{tara_name}")
     
     M[15][0], M[15][1] = "SAFETY FILTER:", (f"🔴 AVOID BREAKOUTS ({', '.join(dangers)})" if dangers else "🟢 SAFE EXECUTION WINDOW")
     M[16][0], M[16][1], M[16][2], M[16][3] = "Tithi (Lord)", "Karana & Bhadra", "Nitya Yoga", "Panchak"
@@ -676,18 +697,18 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     return M, guru_extras
 
 # ==========================================
-# 5. DEEP INSTITUTIONAL TELEGRAM + GEMINI AI BOT
+# 5. BULLETPROOF SESSION-ONLY & OVERLAP AI BOT
 # ==========================================
 def send_telegram_alert(message_text):
     """Sends deep astro-trading analysis to all authorized Chat IDs (comma-separated in Secrets)."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     raw_chats = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not raw_chats:
+        print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
         return
     chat_ids = [cid.strip() for cid in raw_chats.split(",") if cid.strip()]
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     
-    # Split message if > 4000 chars so Telegram never truncates deep analysis
     chunks = [message_text[i:i+3900] for i in range(0, len(message_text), 3900)]
     for cid in chat_ids:
         for chunk in chunks:
@@ -745,7 +766,7 @@ def call_gemini_analyst(prompt_text):
         return None
 
 def check_and_send_session_alerts(target_date):
-    """Triggers ONLY during active Session hours & merges overlapping sessions (Tokyo+London & London+NY)."""
+    """Bulletproof Session-Only Alert Engine: Guarantees 1 alert per active Hora & Lagna shift without missing due to cron gaps."""
     active_snapshots = {}
     trigger_reasons = {}
 
@@ -761,35 +782,43 @@ def check_and_send_session_alerts(target_date):
         active_snapshots[city] = extract_city_snapshot(city, matrix, guru_extras)
         reasons = []
         
-        # Trigger A: Session Open Bell (at exact open minute)
-        mins_since_open = (now_loc.hour * 60 + now_loc.minute) - (open_t.hour * 60 + open_t.minute)
-        if 4 <= mins_since_open <= 5:
-            reasons.append("🔔 SESSION OPEN BELL")
-            
-        # Trigger B: Upcoming Hora Shift (4 to 5.5 mins before current Hora ends)
+        curr_h_num = "0"
+        mins_left_hora = 99.0
         for r in range(2, 26):
             if "👉" in str(matrix[r][17]):
+                curr_h_num = str(matrix[r][17]).replace("👉", "").strip()
                 end_dt = tz.localize(datetime.datetime.combine(
                     now_loc.date(), datetime.datetime.strptime(matrix[r][19], "%I:%M %p").time()
                 ))
                 if end_dt < now_loc:
                     end_dt += datetime.timedelta(days=1)
-                mins_left = (end_dt - now_loc).total_seconds() / 60.0
-                if 4.0 <= mins_left <= 5.5:
-                    reasons.append(f"⏰ UPCOMING HORA SHIFT (in ~5m at {matrix[r][21]} IST)")
+                mins_left_hora = (end_dt - now_loc).total_seconds() / 60.0
                 break
 
-        # Trigger C: ~2-Hour Lagna Shift (4 to 5.5 mins before current Lagna ends)
+        # 1. Guaranteed Alert for Current Active Hora
+        hora_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_H{curr_h_num}"
+        if hora_key not in SENT_STATE_TRACKER:
+            SENT_STATE_TRACKER.add(hora_key)
+            reasons.append(f"⏰ ACTIVE HORA #{curr_h_num} EXECUTION BRIEF")
+
+        # 2. Pre-Alert 5 mins before Next Hora starts
+        if 0.5 <= mins_left_hora <= 5.5:
+            pre_hora_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_PRE_H{curr_h_num}"
+            if pre_hora_key not in SENT_STATE_TRACKER:
+                SENT_STATE_TRACKER.add(pre_hora_key)
+                reasons.append("🔔 UPCOMING HORA SHIFT (in ~5m)")
+
+        # 3. Guaranteed Alert for ~2-Hr Lagna Shift
         _, lagna_et, next_lagna_rashi, next_lagna_tattva = get_current_lagna_window(now_loc, cfg["lat"], cfg["lon"])
         lagna_mins_left = (lagna_et - now_loc).total_seconds() / 60.0
-        if 4.0 <= lagna_mins_left <= 5.5:
-            reasons.append(f"🧭 LAGNA SHIFT (in ~5m -> {next_lagna_rashi} [{next_lagna_tattva}] at {lagna_et.astimezone(IST_TZ).strftime('%I:%M %p')} IST)")
+        if 0.5 <= lagna_mins_left <= 5.5:
+            lagna_key = f"{city}_{now_loc.strftime('%Y-%m-%d')}_LAGNA_{next_lagna_rashi}"
+            if lagna_key not in SENT_STATE_TRACKER:
+                SENT_STATE_TRACKER.add(lagna_key)
+                reasons.append(f"🧭 LAGNA SHIFT (in ~5m -> {next_lagna_rashi} [{next_lagna_tattva}])")
 
         if reasons:
-            alert_key = f"{city}_{now_loc.strftime('%Y-%m-%d_%H:%M')}"
-            if alert_key not in SENT_ALERTS_CACHE:
-                SENT_ALERTS_CACHE.add(alert_key)
-                trigger_reasons[city] = " + ".join(reasons)
+            trigger_reasons[city] = " + ".join(reasons)
 
     if not trigger_reasons:
         return
@@ -808,9 +837,9 @@ def check_and_send_session_alerts(target_date):
                 {active_snapshots[ex1]}
                 {active_snapshots[ex2]}
 
-                Provide a thorough, crystal-clear, deep explanation covering:
-                1. 🔥 OVERLAP & TIMING FUSION ({ex1} + {ex2} in Local & IST): How both exchanges' Hora Lords, Dinmaan, and ~2-Hr Lagna Tattvas interact (Synergy vs Clash).
-                2. 🧬 3-LAYER KP CHAIN & RULING PLANETS: Deep breakdown of Upcoming Hora Lord -> NL -> SL -> 3rd-level SSL, Shadbala/SAV strength, Baladi Avastha, and KP Ruling Planets (Vakri/Sandhi check).
+                Provide a thorough, crystal-clear, deep explanation with EXACT IST & Local timestamps covering:
+                1. 🔥 OVERLAP & TIMING FUSION ({ex1} + {ex2} in Local & IST): Minute-by-minute roadmap of how both exchanges' Hora Lords, Dinmaan, and ~2-Hr Lagna Tattvas interact.
+                2. 🧬 3-LAYER KP CHAIN & RULING PLANETS: Deep breakdown of Hora Lord -> NL -> SL -> 3rd-level SSL, Shadbala/SAV strength, Baladi Avastha, and KP Ruling Planets (Vakri/Sandhi check).
                 3. 🥇 GOLD (XAUUSD) DEEP VERDICT: Exact directional bias (Trend vs Trap/Reversal), liquidity sweep expectation, and planetary reasoning (Sun/Jupiter + Sub-Lords + OOB check).
                 4. 🥈 SILVER (XAGUSD) DEEP VERDICT: Expected volatility, spike risk, and exact planetary reasoning (Moon/Venus + Sub-Lords).
                 5. 🛑 STRICT TRAP & SAFETY FILTER: Exact IST & Local times for Hora Sandhi Freeze (first/last 5m), Rahu/Gulika Kaal, SBC Vedha, and exact Aspect Hit times.
@@ -818,6 +847,8 @@ def check_and_send_session_alerts(target_date):
                 verdict = call_gemini_analyst(prompt)
                 if verdict:
                     send_telegram_alert(verdict)
+                else:
+                    send_telegram_alert(f"⚠️ Astro Engine Alert ({trig_combined}): Gemini AI key check needed!")
                 trigger_reasons.pop(ex1, None)
                 trigger_reasons.pop(ex2, None)
 
@@ -835,8 +866,8 @@ def check_and_send_session_alerts(target_date):
 
         {active_snapshots[city]}
 
-        Provide a thorough, crystal-clear, deep explanation covering:
-        1. ⏰ EXACT TIMING, DINMAAN & LAGNA SHIFT (Local & IST): Explain the upcoming Hora & ~2-Hr Lagna Tattva impact on market speed.
+        Provide a thorough, crystal-clear, deep explanation with EXACT IST & Local timestamps covering:
+        1. ⏰ EXACT TIMING, DINMAAN & LAGNA SHIFT (Local & IST): Minute-by-minute roadmap of the current & upcoming Hora + ~2-Hr Lagna Tattva impact on market speed.
         2. 🧬 3-LAYER KP CHAIN & RULING PLANETS: Deep breakdown of Hora Lord -> NL -> SL -> 3rd-level SSL, Shadbala/SAV, Baladi Avastha, Dignity/Flags, and KP Ruling Planets.
         {asset_focus}
         4. ⚠️ STRICT EXECUTION & TRAP CHECKLIST: Exact IST & Local times for Hora Sandhi Freeze (first/last 5m), Rahu/Gulika Kaal, SBC Vedha, and exact Aspect Hit times.
@@ -844,6 +875,8 @@ def check_and_send_session_alerts(target_date):
         verdict = call_gemini_analyst(prompt)
         if verdict:
             send_telegram_alert(verdict)
+        else:
+            send_telegram_alert(f"⚠️ Astro Engine Alert ({city} - {trig_label}): Gemini AI key check needed!")
 
 # ==========================================
 # 6. PROFESSIONAL STYLING, BORDERS & QUOTA-SAFE LOOP
