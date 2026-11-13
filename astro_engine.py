@@ -755,9 +755,27 @@ def call_gemini_analyst(prompt_text):
     if not api_key:
         return "⚠️ GEMINI_API_KEY Secret खाली है! GitHub Secrets में चाबी डालें।"
     
-    models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # 1. Auto-discover exact active models supported by your API Key
+    models_to_try = []
+    try:
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        with urllib.request.urlopen(list_url, timeout=15) as r:
+            m_data = json.loads(r.read().decode("utf-8"))
+            for m in m_data.get("models", []):
+                m_name = m.get("name", "").replace("models/", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods and "flash" in m_name.lower() and "image" not in m_name.lower() and "audio" not in m_name.lower():
+                    models_to_try.append(m_name)
+    except Exception as e:
+        print("Model list fetch error:", e)
+
+    # Fallback candidates if list fetch fails
+    for fallback in ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash"]:
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
+
     last_err = ""
-    for model_name in models:
+    for model_name in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         body = json.dumps({"contents": [{"parts": [{"text": prompt_text}]}]}).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
@@ -769,7 +787,7 @@ def call_gemini_analyst(prompt_text):
             last_err = f"{model_name}: {str(e)}"
             continue
     print("Gemini all models failed:", last_err)
-    return f"⚠️ Gemini API Error ({last_err[:120]}): कृपया Google AI Studio से नई API Key बनाकर GEMINI_API_KEY Secret अपडेट करें।"
+    return f"⚠️ Gemini API Error ({last_err[:140]}): कृपया Google AI Studio से नई API Key बनाकर GEMINI_API_KEY Secret अपडेट करें।"
 
 def check_and_send_session_alerts(target_date):
     """Bulletproof Session-Only Alert Engine: Guarantees 1 alert per active Hora & Lagna shift without missing due to cron gaps."""
