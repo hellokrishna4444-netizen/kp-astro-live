@@ -2,6 +2,7 @@ import os
 import json
 import time
 import datetime
+import urllib.request
 import pytz
 import swisseph as swe
 import gspread
@@ -24,7 +25,7 @@ if "/d/" in raw_id:
     raw_id = raw_id.split("/d/")[1].split("/")[0]
 sheet = client.open_by_key(raw_id)
 
-# Exchanges Configuration (25-column wide quadrants for extra IST & Summary columns)
+# Exchanges Configuration (25-column wide quadrants)
 CITIES = {
     "Mumbai_NSE": {"lat": 19.0760, "lon": 72.8777, "tz": "Asia/Kolkata",     "row": 1,  "col": 1,  "janma_nak": 12},
     "Tokyo_TSE":  {"lat": 35.6762, "lon": 139.6503,"tz": "Asia/Tokyo",       "row": 1,  "col": 27, "janma_nak": 3},
@@ -32,7 +33,17 @@ CITIES = {
     "New_York":   {"lat": 40.7128, "lon": -74.0060,"tz": "America/New_York", "row": 64, "col": 27, "janma_nak": 21}
 }
 
+# Active Session Windows (Local Exchange Time)
+# Tokyo extended to 17:30 Tokyo (02:00 PM IST) so Tokyo Close + London Open overlap is also captured!
+SESSION_WINDOWS_LOCAL = {
+    "Mumbai_NSE": (datetime.time(9, 10), datetime.time(15, 35)),
+    "Tokyo_TSE":  (datetime.time(8, 55), datetime.time(17, 30)),
+    "London_LSE": (datetime.time(7, 55), datetime.time(16, 35)),
+    "New_York":   (datetime.time(9, 25), datetime.time(16, 05))
+}
+
 IST_TZ = pytz.timezone("Asia/Kolkata")
+SENT_ALERTS_CACHE = set()
 
 # ==========================================
 # 2. SHASTRA TABLES & CONSTANTS
@@ -197,6 +208,7 @@ def evaluate_trinity_alignment(day_lord, tithi_lord, hora_lord):
     return f"⚖️ PARTIAL ALIGNMENT ({day_lord}/{tithi_lord}/{hora_lord}): Standard Technical Confluence"
 
 def get_kp_full(deg):
+    """Calculates Rashi, Navamsha, Nakshatra, NL, SL, and 3rd-level SSL (Sub-Sub-Lord)."""
     deg = deg % 360.0
     rashi_idx = int(deg // 30.0)
     rashi = RASHIS[rashi_idx]
@@ -212,20 +224,34 @@ def get_kp_full(deg):
     rem_nak = deg - (nak_idx * nak_span)
     pada = int(rem_nak // (nak_span / 4.0)) + 1
     
-    curr, sl = 0.0, nl
+    curr, sl, sl_idx, sl_start, sl_span = 0.0, nl, nl_idx, 0.0, nak_span
     for i in range(9):
         idx = (nl_idx + i) % 9
         span = (DASHA_YEARS[idx] / 120.0) * nak_span
         if curr <= rem_nak < (curr + span):
             sl = DASHA_LORDS[idx]
+            sl_idx = idx
+            sl_start = curr
+            sl_span = span
             break
         curr += span
+
+    # 3rd Level Sub-Sub-Lord (SSL) for ultra-precise intraday scalp timing
+    rem_sl = rem_nak - sl_start
+    curr_ssl, ssl = 0.0, sl
+    for j in range(9):
+        idx2 = (sl_idx + j) % 9
+        span2 = (DASHA_YEARS[idx2] / 120.0) * sl_span
+        if curr_ssl <= rem_sl < (curr_ssl + span2):
+            ssl = DASHA_LORDS[idx2]
+            break
+        curr_ssl += span2
         
     return {
         "rashi": rashi, "rashi_idx": rashi_idx, "rashi_num": rashi_idx + 1, "rashi_lord": RASHI_LORDS[rashi_idx],
         "tattva": TATTVA_MAP[rashi], "deg_in_rashi": deg_in_rashi,
         "is_sandhi": (deg_in_rashi >= 29.0 or deg_in_rashi <= 1.0),
-        "d9": d9_rashi, "nak": nak_name, "nak_idx": nak_idx, "pada": pada, "nl": nl, "sl": sl
+        "d9": d9_rashi, "nak": nak_name, "nak_idx": nak_idx, "pada": pada, "nl": nl, "sl": sl, "ssl": ssl
     }
 
 def calculate_planet_next_change(p_name, deg_in_rashi, speed, dt_local):
@@ -385,6 +411,38 @@ def get_karana_and_bhadra(tithi_deg, moon_rashi):
         elif moon_rashi in ["Ar", "Ta", "Ge", "Sc"]: bhadra_vaas = "🟢 Swarga Bhadra"
         else: bhadra_vaas = "🟡 Patala Bhadra"
     return k_name, bhadra_vaas
+
+def get_guru_bot_extras(dt_local, lat, lon, day_lord, mo_kp, asc_kp, planet_speeds):
+    """Guru-level extra calculations for Telegram Bot: KP Ruling Planets, 3rd-level SSL & Out-of-Bounds Declination."""
+    u = dt_local.astimezone(pytz.UTC)
+    jd = swe.julday(u.year, u.month, u.day, u.hour + u.minute/60.0 + u.second/3600.0)
+    
+    # 1. KP Ruling Planets (5 Pillars)
+    rps = [
+        ("DayLord", day_lord),
+        ("MoonSignLord", mo_kp["rashi_lord"]),
+        ("MoonStarLord(NL)", mo_kp["nl"]),
+        ("LagnaSignLord", asc_kp["rashi_lord"]),
+        ("LagnaStarLord(NL)", asc_kp["nl"])
+    ]
+    retro_rps = [f"{role}:{p}" for role, p in rps if planet_speeds.get(p, 1.0) < 0 and p not in ["Ra", "Ke"]]
+    rp_summary = ", ".join([f"{r}={p}" for r, p in rps])
+    rp_warning = f"⚠️ VAKRI RPs ({len(retro_rps)}/5): {', '.join(retro_rps)} -> High Fakeout/Retest Risk!" if len(retro_rps) >= 2 else "✅ RPs Direct/Stable"
+
+    # 2. Out-of-Bounds (OOB) Declination check (> 23.45 deg -> Commodity Spike Trigger)
+    oob_list = []
+    for p_name, p_id in [("Mo", swe.MOON), ("Ma", swe.MARS), ("Me", swe.MERCURY), ("Ju", swe.JUPITER), ("Ve", swe.VENUS), ("Sa", swe.SATURN)]:
+        res_eq, _ = swe.calc_ut(jd, p_id, swe.FLG_EQUATORIAL)
+        decl = abs(res_eq[1])
+        if decl > 23.45:
+            oob_list.append(f"{p_name}(Decl:{decl:.2f}° OOB!)")
+    oob_str = ", ".join(oob_list) if oob_list else "None (All planets within 23.45°)"
+
+    return (
+        f"KP RULING PLANETS: {rp_summary} | {rp_warning}\n"
+        f"3RD-LEVEL KP SSL: Moon SSL = {mo_kp['ssl']} | Lagna SSL = {asc_kp['ssl']}\n"
+        f"OUT-OF-BOUNDS (OOB) COMMODITY SPIKE CHECK: {oob_str}"
+    )
 
 # ==========================================
 # 4. MASTER QUADRANT MATRIX BUILDER (25 COLS)
@@ -553,7 +611,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
     M[3][9] = "👑 TRINITY ALIGNMENT:"
     M[3][11] = trinity_verdict
 
-    # --- D1 & D9 KUNDLI CHARTS WITH SIGN NAME, SAV & PLANET DEGREES ---
+    # --- D1 & D9 KUNDLI CHARTS ---
     M[13][2] = f"D1 Rashi Kundli (Lagna: {asc_kp['rashi']} | SAV: {sav_points[asc_r_idx]})"
     M[13][10] = "D9 Navamsha Kundli"
     diamond_map = {
@@ -602,7 +660,7 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
             diff = min(abs(planet_lons[pk] - planet_lons[pk2]), 360.0 - abs(planet_lons[pk] - planet_lons[pk2]))
             M[21 + idx][jdx + 1] = f"{diff:.1f}"
 
-    # --- PLANETARY SHASTRA TABLE WITH NEXT CHANGE (LOC + IST) & TRADING SUMMARY ---
+    # --- PLANETARY SHASTRA TABLE ---
     p_headers = [
         "Body", "Longitude", "Rasi", "Tattva", "Nakshatra(P)", "NL", "SL", "Speed",
         "Shadbala & SAV", "Baladi Avastha", "Dignity & Flags",
@@ -614,10 +672,181 @@ def build_city_matrix(target_date, city_name, cfg, is_live=False):
         for ci, val in enumerate(pr):
             M[35 + ri][ci] = val
 
-    return M
+    guru_extras = get_guru_bot_extras(dt_local, cfg["lat"], cfg["lon"], day_lord, mo_kp, asc_kp, planet_speeds)
+    return M, guru_extras
 
 # ==========================================
-# 5. PROFESSIONAL STYLING, BORDERS & QUOTA-SAFE LOOP
+# 5. DEEP INSTITUTIONAL TELEGRAM + GEMINI AI BOT
+# ==========================================
+def send_telegram_alert(message_text):
+    """Sends deep astro-trading analysis to all authorized Chat IDs (comma-separated in Secrets)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    raw_chats = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not raw_chats:
+        return
+    chat_ids = [cid.strip() for cid in raw_chats.split(",") if cid.strip()]
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    
+    # Split message if > 4000 chars so Telegram never truncates deep analysis
+    chunks = [message_text[i:i+3900] for i in range(0, len(message_text), 3900)]
+    for cid in chat_ids:
+        for chunk in chunks:
+            payload = json.dumps({"chat_id": cid, "text": chunk}).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(req, timeout=15)
+            except Exception as e:
+                print(f"Telegram send error for {cid}:", e)
+
+def extract_city_snapshot(city_name, matrix, guru_extras):
+    header = f"{matrix[0][0]} | {matrix[0][4]} | {matrix[0][10]}"
+    varesh = f"{matrix[1][8]} ({matrix[1][10]})"
+    lagna = f"{matrix[2][10]} | {matrix[2][6]}"
+    sbc_trinity = f"SBC: {matrix[3][2]} | Trinity: {matrix[3][11]}"
+    safety = f"Safety: {matrix[15][1]} | Rahu: {matrix[18][1]} | Gulika: {matrix[18][3]} | Aspect: {matrix[19][2]}"
+    
+    curr_hora, next_hora = "N/A", "N/A"
+    for r in range(2, 26):
+        if "👉" in str(matrix[r][17]):
+            curr_hora = f"H#{matrix[r][17]} | Loc: {matrix[r][18]}-{matrix[r][19]} | IST: {matrix[r][20]}-{matrix[r][21]} | Lord: {matrix[r][22]} ({matrix[r][23]}) -> {matrix[r][24]}"
+            if r + 1 < 26:
+                next_hora = f"H#{matrix[r+1][17]} | Loc: {matrix[r+1][18]}-{matrix[r+1][19]} | IST: {matrix[r+1][20]}-{matrix[r+1][21]} | Lord: {matrix[r+1][22]} ({matrix[r+1][23]}) -> {matrix[r+1][24]}"
+            break
+
+    planets = [" | ".join([c for c in matrix[r][0:14] if c]) for r in range(35, 48)]
+    return f"""
+====================
+EXCHANGE: {city_name}
+====================
+{header}
+{varesh} | {lagna}
+{sbc_trinity}
+{safety}
+{guru_extras}
+CURRENT HORA: {curr_hora}
+UPCOMING HORA: {next_hora}
+PLANETARY TRANSIT TABLE:
+{chr(10).join(planets)}
+"""
+
+def call_gemini_analyst(prompt_text):
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    body = json.dumps({"contents": [{"parts": [{"text": prompt_text}]}]}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        print("Gemini error:", e)
+        return None
+
+def check_and_send_session_alerts(target_date):
+    """Triggers ONLY during active Session hours & merges overlapping sessions (Tokyo+London & London+NY)."""
+    active_snapshots = {}
+    trigger_reasons = {}
+
+    for city, cfg in CITIES.items():
+        tz = pytz.timezone(cfg["tz"])
+        now_loc = datetime.datetime.now(tz)
+        open_t, close_t = SESSION_WINDOWS_LOCAL[city]
+        
+        if not (open_t <= now_loc.time() <= close_t):
+            continue
+            
+        matrix, guru_extras = build_city_matrix(target_date, city, cfg, is_live=True)
+        active_snapshots[city] = extract_city_snapshot(city, matrix, guru_extras)
+        reasons = []
+        
+        # Trigger A: Session Open Bell (at exact open minute)
+        mins_since_open = (now_loc.hour * 60 + now_loc.minute) - (open_t.hour * 60 + open_t.minute)
+        if 4 <= mins_since_open <= 5:
+            reasons.append("🔔 SESSION OPEN BELL")
+            
+        # Trigger B: Upcoming Hora Shift (4 to 5.5 mins before current Hora ends)
+        for r in range(2, 26):
+            if "👉" in str(matrix[r][17]):
+                end_dt = tz.localize(datetime.datetime.combine(
+                    now_loc.date(), datetime.datetime.strptime(matrix[r][19], "%I:%M %p").time()
+                ))
+                if end_dt < now_loc:
+                    end_dt += datetime.timedelta(days=1)
+                mins_left = (end_dt - now_loc).total_seconds() / 60.0
+                if 4.0 <= mins_left <= 5.5:
+                    reasons.append(f"⏰ UPCOMING HORA SHIFT (in ~5m at {matrix[r][21]} IST)")
+                break
+
+        # Trigger C: ~2-Hour Lagna Shift (4 to 5.5 mins before current Lagna ends)
+        _, lagna_et, next_lagna_rashi, next_lagna_tattva = get_current_lagna_window(now_loc, cfg["lat"], cfg["lon"])
+        lagna_mins_left = (lagna_et - now_loc).total_seconds() / 60.0
+        if 4.0 <= lagna_mins_left <= 5.5:
+            reasons.append(f"🧭 LAGNA SHIFT (in ~5m -> {next_lagna_rashi} [{next_lagna_tattva}] at {lagna_et.astimezone(IST_TZ).strftime('%I:%M %p')} IST)")
+
+        if reasons:
+            alert_key = f"{city}_{now_loc.strftime('%Y-%m-%d_%H:%M')}"
+            if alert_key not in SENT_ALERTS_CACHE:
+                SENT_ALERTS_CACHE.add(alert_key)
+                trigger_reasons[city] = " + ".join(reasons)
+
+    if not trigger_reasons:
+        return
+
+    # 1. OVERLAP FUSION CHECK: London + New York OR Tokyo + London
+    overlap_pairs = [("London_LSE", "New_York"), ("Tokyo_TSE", "London_LSE")]
+    for ex1, ex2 in overlap_pairs:
+        if ex1 in active_snapshots and ex2 in active_snapshots:
+            if ex1 in trigger_reasons or ex2 in trigger_reasons:
+                trig_combined = f"{ex1}: {trigger_reasons.get(ex1, 'Active')} | {ex2}: {trigger_reasons.get(ex2, 'Active')}"
+                prompt = f"""
+                You are a Grandmaster KP & Vedic Financial Astrologer writing a DEEP, STRICT, AND CLEAR institutional trading briefing in Hinglish (Hindi + English trading terms).
+                TWO GLOBAL EXCHANGES ARE OVERLAPPING RIGHT NOW: {ex1} AND {ex2}!
+                TRIGGER EVENT: {trig_combined}
+
+                {active_snapshots[ex1]}
+                {active_snapshots[ex2]}
+
+                Provide a thorough, crystal-clear, deep explanation covering:
+                1. 🔥 OVERLAP & TIMING FUSION ({ex1} + {ex2} in Local & IST): How both exchanges' Hora Lords, Dinmaan, and ~2-Hr Lagna Tattvas interact (Synergy vs Clash).
+                2. 🧬 3-LAYER KP CHAIN & RULING PLANETS: Deep breakdown of Upcoming Hora Lord -> NL -> SL -> 3rd-level SSL, Shadbala/SAV strength, Baladi Avastha, and KP Ruling Planets (Vakri/Sandhi check).
+                3. 🥇 GOLD (XAUUSD) DEEP VERDICT: Exact directional bias (Trend vs Trap/Reversal), liquidity sweep expectation, and planetary reasoning (Sun/Jupiter + Sub-Lords + OOB check).
+                4. 🥈 SILVER (XAGUSD) DEEP VERDICT: Expected volatility, spike risk, and exact planetary reasoning (Moon/Venus + Sub-Lords).
+                5. 🛑 STRICT TRAP & SAFETY FILTER: Exact IST & Local times for Hora Sandhi Freeze (first/last 5m), Rahu/Gulika Kaal, SBC Vedha, and exact Aspect Hit times.
+                """
+                verdict = call_gemini_analyst(prompt)
+                if verdict:
+                    send_telegram_alert(verdict)
+                trigger_reasons.pop(ex1, None)
+                trigger_reasons.pop(ex2, None)
+
+    # 2. SINGLE ACTIVE SESSION ALERTS (Mumbai NSE Index/Stocks OR Standalone Tokyo / London / NY)
+    for city, trig_label in trigger_reasons.items():
+        asset_focus = (
+            "3. 📈 NIFTY / BANKNIFTY / NSE INDEX DEEP VERDICT: Exact directional bias, institutional flow, and planetary reasoning (Sun/Mercury/Jupiter + Sub-Lords)."
+            if city == "Mumbai_NSE" else
+            "3. 🥇 GOLD (XAUUSD) & 🥈 SILVER (XAGUSD) SEPARATE DEEP VERDICTS: Give separate, detailed move predictions and exact astrological reasons for BOTH Gold (Sun/Ju) and Silver (Moon/Ve)."
+        )
+        prompt = f"""
+        You are a Grandmaster KP & Vedic Financial Astrologer writing a DEEP, STRICT, AND CLEAR institutional trading briefing in Hinglish (Hindi + English trading terms).
+        EXCHANGE: {city}
+        TRIGGER EVENT: {trig_label}
+
+        {active_snapshots[city]}
+
+        Provide a thorough, crystal-clear, deep explanation covering:
+        1. ⏰ EXACT TIMING, DINMAAN & LAGNA SHIFT (Local & IST): Explain the upcoming Hora & ~2-Hr Lagna Tattva impact on market speed.
+        2. 🧬 3-LAYER KP CHAIN & RULING PLANETS: Deep breakdown of Hora Lord -> NL -> SL -> 3rd-level SSL, Shadbala/SAV, Baladi Avastha, Dignity/Flags, and KP Ruling Planets.
+        {asset_focus}
+        4. ⚠️ STRICT EXECUTION & TRAP CHECKLIST: Exact IST & Local times for Hora Sandhi Freeze (first/last 5m), Rahu/Gulika Kaal, SBC Vedha, and exact Aspect Hit times.
+        """
+        verdict = call_gemini_analyst(prompt)
+        if verdict:
+            send_telegram_alert(verdict)
+
+# ==========================================
+# 6. PROFESSIONAL STYLING, BORDERS & QUOTA-SAFE LOOP
 # ==========================================
 def safe_api_call(func, *args, **kwargs):
     for attempt in range(4):
@@ -631,7 +860,6 @@ def safe_api_call(func, *args, **kwargs):
                 raise e
 
 def apply_professional_styling(ws):
-    """Applies institutional color-coding, Kundli borders, text wrap, and exact column widths."""
     sheet_id = ws.id
     requests = [
         {
@@ -650,83 +878,42 @@ def apply_professional_styling(ws):
 
     quadrants = [(0, 0), (0, 26), (63, 0), (63, 26)]
     header_colors = [
-        {"red": 0.11, "green": 0.27, "blue": 0.53}, # Mumbai - Royal Blue
-        {"red": 0.45, "green": 0.11, "blue": 0.35}, # Tokyo - Deep Magenta
-        {"red": 0.08, "green": 0.38, "blue": 0.25}, # London - Emerald Green
-        {"red": 0.18, "green": 0.20, "blue": 0.25}  # New York - Charcoal Slate
+        {"red": 0.11, "green": 0.27, "blue": 0.53},
+        {"red": 0.45, "green": 0.11, "blue": 0.35},
+        {"red": 0.08, "green": 0.38, "blue": 0.25},
+        {"red": 0.18, "green": 0.20, "blue": 0.25}
     ]
     solid_border = {"style": "SOLID_MEDIUM", "color": {"red": 0.25, "green": 0.25, "blue": 0.30}}
     thin_border = {"style": "SOLID", "color": {"red": 0.70, "green": 0.72, "blue": 0.78}}
 
     col_widths = [
-        (0, 75),   # Body / Aspect Label
-        (1, 95),   # Longitude
-        (2, 65),   # Rasi
-        (3, 110),  # Tattva
-        (4, 125),  # Nakshatra(P)
-        (5, 55),   # NL
-        (6, 55),   # SL
-        (7, 65),   # Speed
-        (8, 165),  # Shadbala & SAV
-        (9, 105),  # Baladi Avastha
-        (10, 150), # Dignity & Flags
-        (11, 175), # Next Change (Local)
-        (12, 175), # Next Change (IST)
-        (13, 340), # Clear Trading Summary (With Reason)
-        (14, 45),  # Spacer / Chart Col
-        (15, 45),  # Spacer / Chart Col
-        (16, 25),  # Gap before Hora Matrix
-        (17, 55),  # H#
-        (18, 85),  # Start(Loc)
-        (19, 85),  # End(Loc)
-        (20, 85),  # Start(IST)
-        (21, 85),  # End(IST)
-        (22, 55),  # Hora Lord
-        (23, 135), # Varesh Relation
-        (24, 195)  # Action Signal
+        (0, 75), (1, 95), (2, 65), (3, 110), (4, 125), (5, 55), (6, 55), (7, 65),
+        (8, 165), (9, 105), (10, 150), (11, 175), (12, 175), (13, 340), (14, 45),
+        (15, 45), (16, 25), (17, 55), (18, 85), (19, 85), (20, 85), (21, 85),
+        (22, 55), (23, 135), (24, 195)
     ]
 
     for idx, (r0, c0) in enumerate(quadrants):
         bg_col = header_colors[idx]
-        
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r0, "endRowIndex": r0 + 1, "startColumnIndex": c0, "endColumnIndex": c0 + 25},
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": bg_col,
-                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontSize": 10}
-                    }
-                },
+                "cell": {"userEnteredFormat": {"backgroundColor": bg_col, "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontSize": 10}}},
                 "fields": "userEnteredFormat(backgroundColor,textFormat)"
             }
         })
-        
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r0 + 1, "endRowIndex": r0 + 2, "startColumnIndex": c0, "endColumnIndex": c0 + 25},
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": {"red": 0.90, "green": 0.93, "blue": 0.98},
-                        "textFormat": {"bold": True}
-                    }
-                },
+                "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.90, "green": 0.93, "blue": 0.98}, "textFormat": {"bold": True}}},
                 "fields": "userEnteredFormat(backgroundColor,textFormat)"
             }
         })
-        
         for chart_c in [c0, c0 + 8]:
             requests.append({
                 "repeatCell": {
                     "range": {"sheetId": sheet_id, "startRowIndex": r0 + 5, "endRowIndex": r0 + 13, "startColumnIndex": chart_c, "endColumnIndex": chart_c + 7},
-                    "cell": {
-                        "userEnteredFormat": {
-                            "backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.90},
-                            "textFormat": {"bold": True, "fontSize": 8},
-                            "horizontalAlignment": "CENTER",
-                            "wrapStrategy": "WRAP"
-                        }
-                    },
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.90}, "textFormat": {"bold": True, "fontSize": 8}, "horizontalAlignment": "CENTER", "wrapStrategy": "WRAP"}},
                     "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,wrapStrategy)"
                 }
             })
@@ -737,30 +924,17 @@ def apply_professional_styling(ws):
                     "innerHorizontal": thin_border, "innerVertical": thin_border
                 }
             })
-            
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r0 + 34, "endRowIndex": r0 + 35, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": {"red": 0.20, "green": 0.25, "blue": 0.33},
-                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
-                        "wrapStrategy": "WRAP"
-                    }
-                },
+                "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.20, "green": 0.25, "blue": 0.33}, "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}, "wrapStrategy": "WRAP"}},
                 "fields": "userEnteredFormat(backgroundColor,textFormat,wrapStrategy)"
             }
         })
-
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r0 + 35, "endRowIndex": r0 + 48, "startColumnIndex": c0, "endColumnIndex": c0 + 14},
-                "cell": {
-                    "userEnteredFormat": {
-                        "wrapStrategy": "WRAP",
-                        "verticalAlignment": "MIDDLE"
-                    }
-                },
+                "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP", "verticalAlignment": "MIDDLE"}},
                 "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"
             }
         })
@@ -771,16 +945,10 @@ def apply_professional_styling(ws):
                 "innerHorizontal": thin_border, "innerVertical": thin_border
             }
         })
-
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r0 + 1, "endRowIndex": r0 + 26, "startColumnIndex": c0 + 17, "endColumnIndex": c0 + 25},
-                "cell": {
-                    "userEnteredFormat": {
-                        "wrapStrategy": "WRAP",
-                        "verticalAlignment": "MIDDLE"
-                    }
-                },
+                "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP", "verticalAlignment": "MIDDLE"}},
                 "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"
             }
         })
@@ -791,7 +959,6 @@ def apply_professional_styling(ws):
                 "innerHorizontal": thin_border, "innerVertical": thin_border
             }
         })
-
         if r0 == 0:
             for offset_col, px_width in col_widths:
                 requests.append({
@@ -812,7 +979,6 @@ def apply_professional_styling(ws):
         ("NEECH", {"red": 0.99, "green": 0.86, "blue": 0.86}, {"red": 0.65, "green": 0.05, "blue": 0.05}),
         ("👉", {"red": 1.0, "green": 0.94, "blue": 0.70}, {"red": 0.45, "green": 0.25, "blue": 0.0})
     ]
-
     for keyword, bg, fg in cond_rules:
         requests.append({
             "addConditionalFormatRule": {
@@ -826,7 +992,6 @@ def apply_professional_styling(ws):
                 "index": 0
             }
         })
-
     safe_api_call(sheet.batch_update, {"requests": requests})
 
 def update_single_sheet(d, ws, is_live):
@@ -835,7 +1000,7 @@ def update_single_sheet(d, ws, is_live):
         safe_api_call(ws.resize, rows=130, cols=55)
     batch_updates = []
     for city, cfg in CITIES.items():
-        matrix = build_city_matrix(d, city, cfg, is_live=is_live)
+        matrix, _ = build_city_matrix(d, city, cfg, is_live=is_live)
         start_a1 = gspread.utils.rowcol_to_a1(cfg["row"], cfg["col"])
         end_a1 = gspread.utils.rowcol_to_a1(cfg["row"] + len(matrix) - 1, cfg["col"] + len(matrix[0]) - 1)
         batch_updates.append({"range": f"{start_a1}:{end_a1}", "values": matrix})
@@ -852,15 +1017,13 @@ def run_live_engine():
     for title, ws in existing_sheets.items():
         if title not in valid_titles and len(existing_sheets) > 1:
             safe_api_call(sheet.del_worksheet, ws)
-            print(f"Deleted expired sheet: {title}")
             time.sleep(1.5)
             
-    # 2. Create missing OR upgrade ANY sheet that is empty or lacks the new IST + Colourful layout
+    # 2. Create missing OR upgrade ANY sheet lacking the new IST + Colourful layout
     today_ws = None
     for d in valid_dates:
         title = d.strftime("%Y-%m-%d")
         is_today = (d == today_ist)
-        
         if title not in existing_sheets:
             ws = safe_api_call(sheet.add_worksheet, title=title, rows=130, cols=55)
             update_single_sheet(d, ws, is_live=is_today)
@@ -868,23 +1031,20 @@ def run_live_engine():
             time.sleep(3.5)
         else:
             ws = existing_sheets[title]
-            # Check cell U2 (which holds 'Start(IST)' in the new colourful layout)
             u2_val = safe_api_call(ws.acell, "U2").value
             if u2_val != "Start(IST)":
-                print(f"Upgrading & colouring sheet: {title}")
                 update_single_sheet(d, ws, is_live=is_today)
                 apply_professional_styling(ws)
                 time.sleep(3.5)
-                
         if is_today:
             today_ws = ws
 
-    # Ensure today's sheet always gets fresh styling & 1-minute live updates
     apply_professional_styling(today_ws)
 
-    # 3. Every 1-Minute Live Loop for Today's Sheet
+    # 3. Every 1-Minute Live Loop for Today's Sheet + Session-Only Deep AI Telegram Bot
     for minute_tick in range(LIVE_LOOP_MINUTES):
         update_single_sheet(today_ist, today_ws, is_live=True)
+        check_and_send_session_alerts(today_ist)
         if minute_tick < LIVE_LOOP_MINUTES - 1:
             time.sleep(60)
 
